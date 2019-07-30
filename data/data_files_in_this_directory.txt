@@ -1,0 +1,9 @@
+0005-RotSTEM90 ADF1.dm3
+20_Aligned 20-Stack-5MxHAADF STACK(20).dm3
+89109_16_Fe_mantis.hdf5
+89109_16_Fe_mantis_norm.hdf5
+89109_16_Mn_mantis.hdf5
+89125_29_Fe_mantis.hdf5
+89125_29_Mn_mantis.hdf5
+mantis_55510_55660.hdf5
+mantis_raw_55499_55509.hdf5
