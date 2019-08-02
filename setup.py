@@ -69,3 +69,37 @@ factor_minus = scale * (dsquared_minus**(-0.5*(1+power)))
 vfield_3_i = (arr_i - i_plus) * factor_plus + (i_minus - arr_i) * factor_minus
 vfield_3_j = (arr_j - j_plus) * factor_plus + (j_minus - arr_j) * factor_minus
 vfield_3 = np.array([vfield_3_i, vfield_3_j])
+
+# Generate another synthetic signal for demonstration purposes
+
+num_keyframes = 3
+num_between_keyframes = 6
+num_frames = (num_between_keyframes + 1) * num_keyframes
+key_indices = np.arange(num_keyframes + 1) * (num_between_keyframes+1) # 0, 3, 6, 9
+key_scale_x = np.random.rand(num_keyframes + 1) * 0.4 + 0.8
+key_scale_y = np.random.rand(num_keyframes + 1) * 0.4 + 0.8
+key_shear = np.random.rand(num_keyframes + 1) * (2*math.pi/12) - math.pi/12
+key_rotation = np.random.rand(num_keyframes + 1) * (2*math.pi/6) - math.pi/6
+key_offset_x = np.random.rand(num_keyframes + 1) * (0.4 * height) - (0.2 * height)
+key_offset_y = np.random.rand(num_keyframes + 1) * (0.4 * width) - (0.2 * width)
+key_scale_x[-1] = key_scale_x[0]
+key_scale_y[-1] = key_scale_y[0]
+key_shear[-1] = key_shear[0]
+key_rotation[-1] = key_rotation[0]
+key_offset_x[-1] = key_offset_x[0]
+key_offset_y[-1] = key_offset_y[0]
+spline_scale_x = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_scale_x)
+spline_scale_y = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_scale_y)
+spline_shear = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_shear)
+spline_rotation = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_rotation)
+spline_offset_x = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_offset_x)
+spline_offset_y = scipy.interpolate.InterpolatedUnivariateSpline(key_indices, key_offset_y)
+all_scale_x = spline_scale_x(np.arange(0, num_frames))
+all_scale_y = spline_scale_y(np.arange(0, num_frames))
+all_shear= spline_shear(np.arange(0, num_frames))
+all_rotation = spline_rotation(np.arange(0, num_frames))
+all_offset_x = spline_offset_x(np.arange(0, num_frames))
+all_offset_y = spline_offset_y(np.arange(0, num_frames))
+signal_A_2 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
+for t in range(num_frames):
+    signal_A_2.data[t] = ipm.transform_using_values(arr_A, [all_scale_x[t], all_scale_y[t], all_shear[t], all_rotation[t], all_offset_x[t], all_offset_y[t]])

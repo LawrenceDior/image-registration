@@ -366,24 +366,6 @@ def mutual_information(arr_1: np.array, arr_2: np.array):
     Returns the mutual information between arr_1 and arr_2.
     '''
     return minf.mutual_information(arr_1.flatten(), arr_2.flatten())
-    
-    
-def mutual_information_old(arr_1: np.array, arr_2: np.array):
-    '''
-    Mutual information between arr_1[i][j] and arr_2[i][j] for all i, j.
-    Returns the mutual information between arr_1 and arr_2.
-    Obtained from https://matthew-brett.github.io/teaching/mutual_information.html
-    '''
-    # TODO: decide how to optimally position bin edges
-    hgram, x_edges, y_edges = np.histogram2d(arr_1.ravel(), arr_2.ravel(), bins=(20,20))
-    # Convert bin counts to probability values
-    pxy = hgram / float(np.sum(hgram)) # joint probability mass function
-    px = np.sum(pxy, axis=1) # marginal probability mass function for x over y
-    py = np.sum(pxy, axis=0) # marginal probability mass function for y over x
-    px_py = px[:, None] * py[None, :] # Broadcast to multiply marginals
-    # Now we can do the calculation using the pxy, px_py 2D arrays
-    nzs = pxy > 0 # Only non-zero pxy values contribute to the sum
-    return np.sum(pxy[nzs] * np.log(pxy[nzs] / px_py[nzs]))
 
 
 def split_by_mutual_information(signal_in: hs.signals.Signal2D, threshold=0.3):
@@ -544,7 +526,7 @@ def affine(arr_in: np.array, rotate_radians=0.0, scale_x=1.0, scale_y=1.0, shear
     (height, width) = arr_in.shape
     im_in = sitk.GetImageFromArray(arr_in)
     affine = sitk.AffineTransform(2)
-    affine.SetCenter((height/2, width/2))
+    affine.SetCenter((width/2, height/2))
     # Rotate
     affine.Rotate(axis1=0, axis2=1, angle=rotate_radians)
     # Scale
@@ -557,69 +539,301 @@ def affine(arr_in: np.array, rotate_radians=0.0, scale_x=1.0, scale_y=1.0, shear
     # Resample
     im_out = resample(im_in, affine, default_value=arr_in.mean())
     return sitk.GetArrayFromImage(im_out)
-    
 
-def scale(arr_in: np.array, scale_factor_x=1.0, scale_factor_y=1.0):
-    (height, width) = arr_in.shape
-    im_in = sitk.GetImageFromArray(arr_in)
-    affine = sitk.AffineTransform(2)
-    affine.SetCenter((height/2, width/2))
-    # Scale
-    affine.Scale((1/scale_factor_x, 1/scale_factor_y))
-    # Resample
-    im_out = resample(im_in, affine, default_value=arr_in.mean())
-    return sitk.GetArrayFromImage(im_out)
+def affine_from_list(arr_in: np.array, values: list):
+    assert len(values) == 7
+    return affine(
+        arr_in, 
+        rotate_radians=values[0], 
+        scale_x=values[1], 
+        scale_y=values[2], 
+        shear_x=values[3], 
+        shear_y=values[4], 
+        offset_x=values[5], 
+        offset_y=values[6])
+
+def scale(arr_in: np.array, scale_factor_x, scale_factor_y):
+    return transform_using_values(arr_in, [scale_factor_x, scale_factor_y, 0.0, 0.0, 0.0, 0.0])
 
 
-def rotate(arr_in: np.array, rotate_radians=0.0):
-    (height, width) = arr_in.shape
-    im_in = sitk.GetImageFromArray(arr_in)
-    affine = sitk.AffineTransform(2)
-    affine.SetCenter((height/2, width/2))
-    # Scale
-    affine.Rotate(axis1=0, axis2=1, angle=rotate_radians)
-    # Resample
-    im_out = resample(im_in, affine, default_value=arr_in.mean())
-    return sitk.GetArrayFromImage(im_out)
+def rotate(arr_in: np.array, rotate_radians):
+    return transform_using_values(arr_in, [1.0, 1.0, 0.0, rotate_radians, 0.0, 0.0])
     
 
 
 def optimise_scale(arr_moving: np.array, arr_ref: np.array, initial_guess_x=1.0, initial_guess_y=1.0):
+    '''
+    Uses the Powell local optimisation algorithm to obtain scale factors in the x- and y-directions that maximise the mutual information between `arr_scaled` and `arr_ref`, where `arr_scaled` is the scaled version of `arr_moving`.
+    '''
     def inverse_mutual_information_after_scaling(parameters):
         arr_scaled = scale(arr_moving, parameters[0], parameters[1])
         return 1/mutual_information(arr_scaled, arr_ref)
-    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_scaling, [initial_guess_x, initial_guess_y], method='Nelder-Mead')
-    return optimisation_result
+    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_scaling, [initial_guess_x, initial_guess_y], method='Powell')
+    if optimisation_result.success:
+        return optimisation_result.x
+    else:
+        raise ValueError(result.message)
     
 
 
 def optimise_rotation(arr_moving: np.array, arr_ref: np.array, initial_guess_radians=0.1):
+    '''
+    Uses the Powell local optimisation algorithm to obtain a rotation angle (in radians) that maximises the mutual information between `arr_rotated` and `arr_ref`, where `arr_rotated` is the rotated version of `arr_moving`.
+    '''
     def inverse_mutual_information_after_rotation(parameters):
         arr_rotated = rotate(arr_moving, parameters[0])
         return 1/mutual_information(arr_rotated, arr_ref)
-    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_rotation, [initial_guess_radians], method='Nelder-Mead')
-    return optimisation_result
+    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_rotation, [initial_guess_radians], method='Powell')
+    if optimisation_result.success:
+        return optimisation_result.x
+    else:
+        raise ValueError(result.message)
+    
 
 
-def optimise_affine(arr_moving: np.array, arr_ref: np.array, rotate_radians=0.1, scale_x=1.0, scale_y=1.0, shear_x=0.0, shear_y=0.0, offset_x=0.0, offset_y=0.0):
+def optimise_rotation_best_of_two(arr_moving: np.array, arr_ref: np.array):
+    '''
+    Uses the Nelder-Mead local optimisation algorithm to obtain a rotation angle (in radians) that maximises the mutual information between `arr_rotated` and `arr_ref`, where `arr_rotated` is the rotated version of `arr_moving`.
+    '''
+    result_1 = optimise_rotation(arr_moving, arr_ref, initial_guess_radians=0.2)
+    result_2 = optimise_rotation(arr_moving, arr_ref, initial_guess_radians=-0.2)
+    rotated_1 = rotate(arr_moving, float(result_1))
+    rotated_2 = rotate(arr_moving, float(result_2))
+    if mutual_information(rotated_1, arr_ref) > mutual_information(rotated_2, arr_ref):
+        return result_1
+    else:
+        return result_2
+    
+
+
+def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, shear_radians=0.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None):
+    '''
+    Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
+    '''
+    (height, width) = arr_moving.shape
+    if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
+        bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3), (-math.pi/3, math.pi/3), (-height, height), (-width, width)]
     def inverse_mutual_information_after_transform(parameters):
-        arr_transformed = affine(arr_moving, rotate_radians=parameters[0], scale_x=parameters[1], scale_y=parameters[2], shear_x=parameters[3], shear_y=parameters[4], offset_x=parameters[5], offset_y=parameters[6])
+        arr_transformed = transform_using_values(arr_moving, parameters)
         return 1/mutual_information(arr_transformed, arr_ref)
-    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [rotate_radians, scale_x, scale_y, shear_x, shear_y, offset_x, offset_y], method='Nelder-Mead')
-    return optimisation_result
+    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [scale_x, scale_y, shear_radians, rotate_radians, offset_x, offset_y], method=method, bounds=bounds)
+    if optimisation_result.success:
+        return optimisation_result.x
+    else:
+        raise ValueError(result.message)
+    
 
 
-def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, shear_radians=0.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0):
+def optimise_affine_no_shear(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None):
+    '''
+    Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    '''
+    (height, width) = arr_moving.shape
+    if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
+        bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3), (-height, height), (-width, width)]
     def inverse_mutual_information_after_transform(parameters):
-        transform = skimage.transform.AffineTransform(matrix=np.array([[parameters[0], parameters[1], parameters[2]], [parameters[3], parameters[4], parameters[5]], [0, 0, 1]]))
-        arr_transformed = skimage.transform.warp(arr_moving, transform.inverse)
+        arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]])
+        #arr_transformed = affine_from_list(arr_moving, [parameters[2], parameters[0], parameters[1], 0, 0, parameters[3], parameters[4]])
         return 1/mutual_information(arr_transformed, arr_ref)
-    a0 = scale_x * math.cos(rotate_radians)
-    a1 = -scale_y * math.sin(rotate_radians + shear_radians)
+    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [scale_x, scale_y, rotate_radians, offset_x, offset_y], method=method, bounds=bounds)
+    if optimisation_result.success:
+        return optimisation_result.x
+    else:
+        raise ValueError(result.message)
+    
+
+
+def optimise_scale_and_rotation(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, rotate_radians=0.0, method='Powell', bounds=None):
+    '''
+    Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    '''
+    if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
+        bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
+    def inverse_mutual_information_after_transform(parameters):
+        arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], 0, 0])
+        #arr_transformed = affine_from_list(arr_moving, [parameters[2], parameters[0], parameters[1], 0, 0, 0, 0])
+        return 1/mutual_information(arr_transformed, arr_ref)
+    optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [scale_x, scale_y, rotate_radians], method=method, bounds=bounds)
+    if optimisation_result.success:
+        return optimisation_result.x
+    else:
+        raise ValueError(result.message)
+    
+
+
+def optimise_scale_and_rotation_best_of_two(arr_moving: np.array, arr_ref: np.array, method='Powell', bounds=None):
+    '''
+    Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    '''
+    if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
+        bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
+    result_1 = optimise_scale_and_rotation(arr_moving, arr_ref, rotate_radians=0.2, method=method, bounds=bounds)
+    result_2 = optimise_scale_and_rotation(arr_moving, arr_ref, rotate_radians=-0.2, method=method, bounds=bounds)
+    transformed_1 = transform_using_values(arr_moving, [result_1[0], result_1[1], 0, result_1[2], 0, 0])
+    transformed_2 = transform_using_values(arr_moving, [result_2[0], result_2[1], 0, result_2[2], 0, 0])
+    if mutual_information(transformed_1, arr_ref) > mutual_information(transformed_2, arr_ref):
+        return result_1
+    else:
+        return result_2
+        
+
+
+def transform_using_matrix(arr_in: np.array, matrix):
+    tform = skimage.transform.AffineTransform(matrix=matrix)
+    return skimage.transform.warp(arr_in/arr_in.max(), tform.inverse, cval=arr_in.mean()/arr_in.max())*arr_in.max()
+
+
+def optimise_affine_by_differential_evolution(arr_moving: np.array, arr_ref: np.array, bounds=None, maxiter=1000):
+    def inverse_mutual_information_after_transform(parameters):
+        return 1/mutual_information(transform_using_values(arr_moving, parameters), arr_ref)
+    if bounds is None:
+        max_scale_factor = 2
+        max_translate_factor = 0.2
+        bounds = [
+            (1/max_scale_factor, max_scale_factor), # scale_x
+            (1/max_scale_factor, max_scale_factor), # scale_y
+            (-math.pi/3, math.pi/3), # shear
+            (-math.pi/3, math.pi/3), # rotation
+            (-arr_moving.shape[0]*max_translate_factor, arr_moving.shape[0]*max_translate_factor), # offset_x
+            (-arr_moving.shape[1]*max_translate_factor, arr_moving.shape[1]*max_translate_factor)] # offset_y
+    assert bounds[0][0] > 0
+    #assert bounds[0][1] >= max(bounds[0][0], 1)
+    assert bounds[0][1] >= bounds[0][0]
+    assert bounds[1][0] > 0
+    #assert bounds[1][1] >= max(bounds[1][0], 1)
+    assert bounds[1][1] >= bounds[1][0]
+    assert abs(bounds[2][0]) < math.pi/2
+    assert abs(bounds[2][1]) < math.pi/2 and bounds[2][1] >= bounds[2][0]
+    assert abs(bounds[3][0]) <= math.pi
+    assert abs(bounds[3][1]) <= math.pi and bounds[3][1] >= bounds[3][0]
+    assert abs(bounds[4][0]) <= arr_moving.shape[0]
+    assert abs(bounds[4][1]) <= arr_moving.shape[0] and bounds[4][1] >= bounds[4][0]
+    assert abs(bounds[5][0]) <= arr_moving.shape[1]
+    assert abs(bounds[5][1]) <= arr_moving.shape[1] and bounds[5][1] >= bounds[5][0]
+    
+    de_result = scipy.optimize.differential_evolution(inverse_mutual_information_after_transform, bounds, maxiter=maxiter).x
+    inv_mi_no_transform = inverse_mutual_information_after_transform([1, 1, 0, 0, 0, 0])
+    inv_mi = inverse_mutual_information_after_transform(de_result)
+    if inv_mi_no_transform <= inv_mi:
+        de_result = [1, 1, 0, 0, 0, 0]
+    return de_result
+
+
+def affine_params_to_matrix(params: list):
+    assert len(params) == 6
+    [scale_x, scale_y, shear, rotation, offset_x, offset_y] = params
+    a0 = scale_x * math.cos(rotation)
+    a1 = -scale_y * math.sin(rotation + shear)
     a2 = offset_x
-    b0 = scale_x * math.sin(rotate_radians)
-    b1 = scale_y * math.cos(rotate_radians + shear_radians)
+    b0 = scale_x * math.sin(rotation)
+    b1 = scale_y * math.cos(rotation + shear)
     b2 = offset_y
-    #optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [a0, a1, a2, b0, b1, b2], method='Nelder-Mead')
-    optimisation_result = scipy.optimize.basinhopping(inverse_mutual_information_after_transform, [a0, a1, a2, b0, b1, b2], niter=1000000, niter_success=5, T=10.0)
-    return optimisation_result
+    return np.array([[a0, a1, a2], [b0, b1, b2], [0, 0, 1]])
+
+
+def affine_matrix_to_params(matrix: np.array):
+    assert len(matrix.shape) == 2
+    assert matrix.shape[0] == 3
+    assert matrix.shape[1] == 3
+    a0 = matrix[0][0]
+    a1 = matrix[0][1]
+    a2 = matrix[0][2]
+    b0 = matrix[1][0]
+    b1 = matrix[1][1]
+    b2 = matrix[1][2]
+    scale_x = math.sqrt(a0**2 + b0**2)
+    scale_y = math.sqrt(a1**2 + b1**2)
+    rotation = math.atan2(b0, a0)
+    shear = math.atan2(-a1, b1) - rotation
+    offset_x = a2
+    offset_y = b2
+    return [scale_x, scale_y, shear, rotation, offset_x, offset_y]
+    
+
+def combine_affine_params(params_applied_first: list, params_applied_second: list):
+    matrix_applied_first = affine_params_to_matrix(params_applied_first)
+    matrix_applied_second = affine_params_to_matrix(params_applied_second)
+    matrix_combined = np.matmul(matrix_applied_second, matrix_applied_first)
+    return affine_matrix_to_params(matrix_combined)
+
+
+def pyramid_affine(arr_moving: np.array, arr_ref: np.array, num_levels=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None):
+    (height, width) = arr_moving.data.shape
+    params = [1, 1, 0, 0, 0, 0]
+    for n in range(num_levels):
+        power_of_2 = num_levels - 1 - n
+        (new_height, new_width) = (height//(2**power_of_2), width//(2**power_of_2))
+        if new_height < 2 or new_width < 2:
+            continue
+        (arr_moving_downsampled, arr_ref_downsampled) = (transform_using_values(arr_moving, params), arr_ref)
+        if power_of_2 > 0:
+            arr_moving_downsampled = skimage.transform.resize(arr_moving_downsampled, (new_height, new_width), mode='reflect', anti_aliasing=True)
+            arr_ref_downsampled = skimage.transform.resize(arr_ref_downsampled, (new_height, new_width), mode='reflect', anti_aliasing=True)
+        new_params = [1, 1, 0, 0, 0, 0]
+        if reg_args is None:
+            new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled)
+        else:
+            new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, *reg_args)
+        if power_of_2 > 0:
+            # Computed offsets must be scaled up
+            new_params[4] *= height/new_height
+            new_params[5] *= width/new_width
+        combined_params = combine_affine_params(params, new_params)
+        if (mutual_information(transform_using_values(arr_moving, combined_params), arr_ref) > mutual_information(transform_using_values(arr_moving, params), arr_ref)):
+            params = combined_params
+    return params
+
+
+def pyramid_scale_and_translation(arr_moving: np.array, arr_ref: np.array, num_levels=3, registration_method=optimise_affine_by_differential_evolution):
+    (height, width) = arr_moving.data.shape
+    params = [1, 1, 0, 0, 0, 0]
+    for n in range(num_levels):
+        power_of_2 = num_levels - 1 - n
+        (new_height, new_width) = (height//(2**power_of_2), width//(2**power_of_2))
+        if new_height < 2 or new_width < 2:
+            continue
+        (arr_moving_downsampled, arr_ref_downsampled) = (transform_using_values(arr_moving, params), arr_ref)
+        if power_of_2 > 0:
+            arr_moving_downsampled = skimage.transform.resize(arr_moving_downsampled, (new_height, new_width), mode='reflect', anti_aliasing=True)
+            arr_ref_downsampled = skimage.transform.resize(arr_ref_downsampled, (new_height, new_width), mode='reflect', anti_aliasing=True)
+        new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, bounds=[(0.8, 1.2), (0.8, 1.2), (0, 0), (0, 0), (-height*0.2, height*0.2), (-width*0.2, width*0.2)])
+        if power_of_2 > 0:
+            # Computed offsets must be scaled up
+            new_params[4] *= height/new_height
+            new_params[5] *= width/new_width
+        combined_params = combine_affine_params(params, new_params)
+        if (mutual_information(transform_using_values(arr_moving, combined_params), arr_ref) > mutual_information(transform_using_values(arr_moving, params), arr_ref)):
+            params = combined_params
+    return params
+
+
+def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_levels=3, registration_method=optimise_affine_by_differential_evolution):
+    num_images = signal_in.data.shape[0]
+    params = np.empty((num_images, 6))
+    mi_max_index = highest_mutual_information_index(signal_in)
+    for t in range(num_images):
+        print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
+        params[t] = pyramid_scale_and_translation(signal_in.data[t], signal_in.data[mi_max_index], num_levels=num_levels, registration_method=registration_method)
+    return params
+    return params
+
+
+def affine_signal_params(signal_in: hs.signals.Signal2D, num_levels=3, registration_method=optimise_affine_by_differential_evolution):
+    num_images = signal_in.data.shape[0]
+    params = np.empty((num_images, 6))
+    mi_max_index = highest_mutual_information_index(signal_in)
+    for t in range(num_images):
+        print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
+        params[t] = pyramid_affine(signal_in.data[t], signal_in.data[mi_max_index], num_levels=num_levels, registration_method=registration_method)
+    return params
+
+
+def apply_affine_params_to_signal(signal_in: hs.signals.Signal2D, params: np.array):
+    num_images = signal_in.data.shape[0]
+    assert len(params.shape) == 2
+    assert params.shape[0] == num_images
+    assert params.shape[1] == 6
+    signal_out = hs.signals.Signal2D(np.empty_like(signal_in.data))
+    for t in range(num_images):
+        signal_out.data[t] = transform_using_values(signal_in.data[t], params[t])
+    return signal_out
