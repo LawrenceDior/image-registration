@@ -816,9 +816,8 @@ def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_leve
     params = np.empty((num_images, 6))
     mi_max_index = highest_mutual_information_index(signal_in)
     for t in range(num_images):
-        print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
+        print("Estimating scale and translation parameters for frame " + str(t+1) + " of " + str(num_images))
         params[t] = pyramid_scale_and_translation(signal_in.data[t], signal_in.data[mi_max_index], num_levels=num_levels, registration_method=registration_method)
-    return params
     return params
 
 
