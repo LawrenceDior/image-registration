@@ -59,6 +59,10 @@ def get_signal_average_rank_difference(signal_in: hs.signals.Signal2D, weighted=
     return hs.signals.Signal2D(difference_data)
 
 
+def normalised_image(arr_in: np.array):
+    return (arr_in - arr_in.min()) / (arr_in.max() - arr_in.min())
+
+
 def get_neighbour_similarity(arr_in: np.array, exponent=2):
     '''
     Similarity to neighbouring pixels relative to whole image.
@@ -73,7 +77,7 @@ The current implementation of this method is quite crude, but nonetheless produc
     '''
     data_shape = arr_in.data.shape
     similarity_data = np.empty(data_shape)
-    normalised_data = (arr_in - arr_in.min())/(arr_in.max() - arr_in.min())
+    normalised_data = normalised_image(arr_in)
     mean_intensity = np.mean(normalised_data)
     for i in range(data_shape[0]):
         for j in range(data_shape[1]):
@@ -620,7 +624,7 @@ def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_
     if optimisation_result.success:
         return optimisation_result.x
     else:
-        raise ValueError(result.message)
+        raise ValueError(optimisation_result.message)
     
 
 
