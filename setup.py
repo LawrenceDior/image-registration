@@ -1,7 +1,7 @@
 import cv2
 import h5py  # hdf5 reader/writer
 import hyperspy.api as hs  # hyperspy
-import ImageProcessingMethods as ipm
+import image_processing as ipm
 import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
