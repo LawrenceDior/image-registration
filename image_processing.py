@@ -205,7 +205,7 @@ def get_neighbour_similarity_faster(arr_in: np.array, feature_length=0, print_pr
         if print_progress:
             print("Row " + str(i+1) + " of " + str(h) + ": i_small = " + str(i_small))
         for j in range(w):
-            j_small = int(i * (w_small/w))
+            j_small = int(j * (w_small/w))
             # Extract weights relevant to element i, j
             weights = get_weights(weights_all, i_small, j_small)
             assert weights.shape == (h_small, w_small)
