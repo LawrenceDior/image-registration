@@ -63,6 +63,8 @@ def normalised_image(arr_in: np.array):
     '''
     Scale the contents of an array to values between 0 and 1.
     '''
+    if arr_in.max() == arr_in.min():
+        return np.ones_like(arr_in) * max(0, min(1, arr_in.max()))
     return (arr_in - arr_in.min()) / (arr_in.max() - arr_in.min())
 
 
@@ -79,7 +81,7 @@ def get_neighbour_similarity(arr_in: np.array, exponent=2, print_progress=False)
     The current implementation of this method is quite crude, but nonetheless produces qualitatively sensible results.
     '''
     (h, w) = arr_in.shape
-    similarity_data = np.empty_like(arr_in)
+    similarity_data = np.empty(arr_in.shape, dtype=float)
     normalised_data = normalised_image(arr_in)
     mean_intensity = np.mean(normalised_data)
     
@@ -148,6 +150,94 @@ def get_neighbour_similarity(arr_in: np.array, exponent=2, print_progress=False)
     return similarity_data
 
 
+def get_neighbour_similarity_approx_v2(arr_in: np.array, feature_length=0, print_progress=False):
+    (h, w) = arr_in.shape
+    if (feature_length < 1):
+        feature_length = max(1, max(h, w)/64)
+    #exponent = 2/(1 + math.log2(feature_length))
+    exponent = 2
+    if print_progress:
+        print("feature_length = " + str(feature_length) + ", exponent = " + str(exponent))
+    
+    h_small = int(h/feature_length)
+    w_small = int(w/feature_length)
+    if print_progress:
+        print("(h, w) = " + str((h, w)) + ", (h_small, w_small) = " + str((h_small, w_small)))
+    similarity_data = np.empty(arr_in.shape, dtype=float)
+    normalised_data = normalised_image(arr_in)
+    mean_intensity = np.mean(normalised_data)
+    
+    # Construct a matrix of weights such that weights_all.shape = (2*h-1, 2*w-1) and weights_all[i][j] = ((i-h+1)**2 + (j-w+1)**2)**(-exponent/2)
+    indices_i = np.arange(2 * h - 1).reshape(2 * h - 1, 1)
+    indices_j = np.arange(2 * w - 1).reshape(1, 2 * w - 1)
+    term_i = (indices_i - h + 1)**2
+    term_j = (indices_j - w + 1)**2
+    terms_ij = term_i + term_j
+    # Set central element to 1 to avoid dividing by zero
+    terms_ij[h-1][w-1] = 1
+    weights_all = terms_ij ** (-exponent/2)
+    # Set central element to 0
+    weights_all[h-1][w-1] = 0
+    if print_progress:
+        print("weights_all constructed")
+    assert weights_all.shape == (2*h-1, 2*w-1)
+
+    def get_local_square(arr, i, j, multiplier=3):
+        (h, w) = arr.shape
+        delta = int(feature_length * multiplier)
+        top_left_i = max(i-delta,0)
+        top_left_j = max(j-delta,0)
+        bottom_right_i = min(i+1+delta,h)
+        bottom_right_j = min(j+1+delta,w)
+        return arr[top_left_i:bottom_right_i, top_left_j:bottom_right_j]
+    
+    def get_weights(weights_all, i, j):
+        (h_all, w_all) = weights_all.shape
+        assert h_all % 2 == 1
+        assert w_all % 2 == 1
+        h = (h_all+1)//2
+        w = (w_all+1)//2
+        assert i < h
+        assert j < w
+        weights = weights_all[h-i-1:2*h-i-1, w-j-1:2*w-j-1]
+        return get_local_square(weights, i, j)
+    
+    for i in range(h):
+        if print_progress:
+            print("Row " + str(i+1) + " of " + str(h))
+        for j in range(w):
+            # Extract weights relevant to element i, j
+            weights = get_weights(weights_all, i, j)
+            # weights_sum: used to keep all pixels on the same scale
+            weights_sum = np.sum(weights)
+            
+            current_intensity = normalised_data[i][j]
+            # similarities: pixels similar to i, j have high intensities
+            normalised_data_local = get_local_square(normalised_data, i, j)
+            similarities = 1 - abs(normalised_data_local - current_intensity)
+            weighted_similarity = similarities * weights
+            
+            # weighted_similarity_sum: sum of similarity matrix weighted by spatial proximity to i, j
+            # local_similarity: same value scaled by 1/weights_sum 
+            weighted_similarity_sum = np.sum(weighted_similarity)
+            local_similarity = weighted_similarity_sum / weights_sum
+            
+            # weighted_intensity_sum: sum of intensity matrix weighted by spatial proximity to i, j
+            # local_intensity: same value scaled by 1/weights_sum
+            # local_abnormality: measure of how atypical the local area is compared to the image as a whole
+            weighted_intensity = normalised_data_local * weights
+            weighted_intensity_sum = np.sum(weighted_intensity)
+            local_intensity = weighted_intensity_sum / weights_sum
+            local_abnormality = abs(local_intensity - mean_intensity)
+            
+            # relative_similarity: highest for pixels in an atypical region that are typical for that region
+            relative_similarity = local_similarity * local_abnormality
+            similarity_data[i][j] = relative_similarity
+            """if j == 50 and print_progress:
+                print("weights_sum = " + str(weights_sum) + ", current_intensity = " + str(current_intensity) + ", weighted_similarity_sum = " + str(weighted_similarity_sum) + ", local_similarity = " + str(local_similarity) + ", weighted_intensity_sum = " + str(weighted_intensity_sum) + ", local_intensity = " + str(local_intensity) + ", local_abnormality = " + str(local_abnormality) + ", relative_similarity = " + str(relative_similarity))"""
+    return similarity_data
+
+
 def get_neighbour_similarity_faster(arr_in: np.array, feature_length=0, print_progress=False):
     '''
     Faster version of `get_neighbour_similarity` that uses downsampling. Currently does not work as intended.
@@ -166,7 +256,7 @@ def get_neighbour_similarity_faster(arr_in: np.array, feature_length=0, print_pr
         print("(h, w) = " + str((h, w)) + ", (h_small, w_small) = " + str((h_small, w_small)))
     arr_downsampled = skimage.transform.resize(arr_in, (h_small, w_small), mode='reflect', anti_aliasing=True)
     
-    similarity_data = np.empty_like(arr_in)
+    similarity_data = np.empty(arr_in.shape, dtype=float)
     normalised_data = normalised_image(arr_in)
     mean_intensity = np.mean(normalised_data)
     
@@ -245,6 +335,20 @@ def get_signal_neighbour_similarity(signal_in: hs.signals.Signal2D, exponent=2, 
         if (print_progress):
             print("Calculating pixel-wise neighbour similarity for frame " + str(i+1) + " of " + str(data_shape[0]))
         similarity_data[i] = get_neighbour_similarity(signal_in.data[i], exponent=exponent, print_progress=print_progress)
+    return hs.signals.Signal2D(similarity_data)
+
+
+def get_signal_neighbour_similarity_approx_v2(signal_in: hs.signals.Signal2D, feature_length=0, print_progress=False):
+    '''
+    Applies `get_neighbour_similarity_approx_v2` to all the images in a stack.
+    Returns a new image stack.
+    '''
+    data_shape = signal_in.data.shape
+    similarity_data = np.empty(data_shape)
+    for i in range(data_shape[0]):
+        if (print_progress):
+            print("Calculating pixel-wise neighbour similarity for frame " + str(i+1) + " of " + str(data_shape[0]))
+        similarity_data[i] = get_neighbour_similarity_approx_v2(signal_in.data[i], feature_length=feature_length, print_progress=print_progress)
     return hs.signals.Signal2D(similarity_data)
 
 
@@ -548,6 +652,41 @@ def mutual_information(arr_1: np.array, arr_2: np.array):
     return im.mutual_information(arr_1.flatten(), arr_2.flatten())
 
 
+def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
+    assert arr_fixed.shape == arr_to_transform.shape
+    arr_transformed = transform_using_values(arr_to_transform, values, cval=float('-inf'))
+    arr_1 = arr_fixed.ravel()
+    arr_2 = arr_transformed.ravel()
+    arr_1_reduced = []
+    arr_2_reduced = []
+    assert len(arr_1) >= 3
+    if debug:
+        print("min = " + str(arr_to_transform.min()))
+        print(values)
+    for i in range(len(arr_1)):
+        #if i % (len(arr_1)//10) == 0:
+        #    print("arr_2[" + str(i) + "] = " + str(arr_2[i]))
+        if arr_2[i] >= arr_to_transform.min():
+            arr_1_reduced.append(arr_1[i])
+            arr_2_reduced.append(arr_2[i])
+    if debug:
+        print("Length = " + str(len(arr_2_reduced)))
+    #assert len(arr_1_reduced) >= 3
+    if len(arr_1_reduced) < 3:
+        return 0
+    else:
+        sm = im.mutual_information(arr_1_reduced, arr_2_reduced) * len(arr_1_reduced) / len(arr_1)
+        if debug:
+            mi = im.mutual_information(arr_1, transform_using_values(arr_to_transform, values, cval_mean=True).ravel())
+            print((mi, sm))
+        return sm
+
+def similarity_measure_after_transform(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
+    assert arr_fixed.shape == arr_to_transform.shape
+    arr_transformed = transform_using_values(arr_to_transform, values, cval=float('-1'))
+    return im.similarity_measure(normalised_image(arr_fixed), normalised_image(arr_transformed), measure="NMI")
+
+
 def split_by_mutual_information(signal_in: hs.signals.Signal2D, threshold=0.3):
     '''
     Split a signal into a list of numpy arrays of images. Each numpy array in the list contains a subsection of the original signal. For each image in a subsection, the mutual information between that image and the first image in the subsection must be at least some value given by the `threshold` parameter.
@@ -616,7 +755,7 @@ def estimate_shift_relative_to_most_representative_image(signal_in: hs.signals.S
     return np.array(shifts_all)
 
 
-def transform_using_values(arr_in: np.array, values: list):
+def transform_using_values(arr_in: np.array, values: list, cval=-1, cval_mean=False):
     '''
     Applies an affine transformation to `arr_in` using the parameter values in `values`.
     '''
@@ -638,10 +777,14 @@ def transform_using_values(arr_in: np.array, values: list):
     b1 = scale_y * math.cos(rotate_radians + shear_radians)
     b2 = b0 * shift_x + b1 * shift_y + offset_y - shift_y
     tform = skimage.transform.AffineTransform(matrix=np.array([[a0, a1, a2], [b0, b1, b2], [0, 0, 1]]))
-    # For some reason, arr_in must be normalised first and scaled back up afterwards, or this method won't work on matrices with large entries.
-    arr_out = skimage.transform.warp(arr_in/arr_in.max(), tform.inverse, cval=arr_in.mean()/arr_in.max())*arr_in.max()
-    #arr_out = skimage.transform.warp(arr_in/arr_in.max(), tform.inverse, mode='edge')*arr_in.max()
+    if cval_mean:
+        cval = arr_in.mean()
+    arr_out = skimage.transform.warp(arr_in.astype(float), tform.inverse, cval=cval)
     return arr_out
+
+
+def skimage_estimate_shift(arr_moving: np.array, arr_ref: np.array, upsample_factor=10):
+    return skimage.feature.register_translation(arr_moving, arr_ref, upsample_factor=upsample_factor, space='real', return_error=False)
 
 
 def shift(arr_in: np.array, offset_x, offset_y):
@@ -801,7 +944,7 @@ def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_
     params = np.array([scale_x, scale_y, shear_radians, rotate_radians, offset_x, offset_y])
     (height, width) = arr_moving.shape
     if bounds is None:
-        bounds = [(0.5, 2), (0.5, 2), (-math.pi/6, math.pi/6), (-math.pi/6, math.pi/6), (-height*0.2, height*0.2), (-width*0.2, width*0.2)]
+        bounds = np.array([(0.5, 2), (0.5, 2), (-math.pi/6, math.pi/6), (-math.pi/6, math.pi/6), (-height*0.2, height*0.2), (-width*0.2, width*0.2)])
     
     def inverse_mutual_information_after_transform(free_params):
         def _outside_limits(x: np.array):
@@ -812,7 +955,7 @@ def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_
             params_out = np.array(params)
             for i in range(6):
                 params_out[i] = max(params[i], bounds[i][0])
-                params_out[i] = min(params[i], bounds[i][0])
+                params_out[i] = min(params_out[i], bounds[i][1])
             return params_out
         transform_params = fill_missing_parameters(free_params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
         arr_transformed = transform_using_values(arr_moving, transform_params)
@@ -842,7 +985,118 @@ def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_
             optimised_parameters = np.array([optimised_parameters])
         return fill_missing_parameters(optimised_parameters, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
     else:
-        raise ValueError(optimisation_result.message)    
+        raise ValueError(optimisation_result.message)
+    
+    
+def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, shear_radians=0.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None, isotropic_scaling=False, lock_scale=False, lock_shear=False, lock_rotation=False, lock_translation=False, debug=False, basinhopping=False, scale_bounds=False, basinhopping_kwargs={'T': 0.5, 'minimizer_kwargs': {'method': 'Powell'}}):
+    '''
+    Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
+    '''
+    params = np.array([scale_x, scale_y, shear_radians, rotate_radians, offset_x, offset_y])
+    (height, width) = arr_moving.shape
+    if bounds is None:
+        bounds = np.array([(0.5, 2), (0.5, 2), (-math.pi/6, math.pi/6), (-math.pi/6, math.pi/6), (-height*0.2, height*0.2), (-width*0.2, width*0.2)])
+        
+    def free_params_to_guess(params):
+        if not scale_bounds:
+            return params
+        bounds_reduced = remove_locked_parameters(bounds, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
+        params_scaled = []
+        for p in range(len(params)):
+            p_min = bounds_reduced[p][0]
+            p_max = bounds_reduced[p][1]
+            p_avg = (p_min + p_max)/2
+            p_range = p_max - p_min
+            scaled = (params[p] - p_avg)/(p_range/2)
+            params_scaled.append(scaled)
+        return params_scaled
+    
+    def guess_to_free_params(params_scaled):
+        if len(params_scaled.shape) == 0:
+            params_scaled = np.array([params_scaled])
+        if not scale_bounds:
+            return params_scaled
+        bounds_reduced = remove_locked_parameters(bounds, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
+        params = []
+        for p in range(len(params_scaled)):
+            p_min = bounds_reduced[p][0]
+            p_max = bounds_reduced[p][1]
+            p_avg = (p_min + p_max)/2
+            p_range = p_max - p_min
+            param = p_avg + params_scaled[p] * p_range/2
+            params.append(param)
+        return params
+    
+    def inverse_mutual_information_after_transform(params_scaled):
+        def _outside_limits(x: np.array):
+            [xmin, xmax] = np.array(bounds).T
+            return (np.any(x < xmin) or np.any(x > xmax))
+        def _fit_params_to_bounds(params):
+            assert len(params) == 6
+            params_out = np.array(params)
+            for i in range(6):
+                params_out[i] = max(params[i], bounds[i][0])
+                params_out[i] = min(params_out[i], bounds[i][1])
+            return params_out
+        free_params = guess_to_free_params(params_scaled)
+        transform_params = fill_missing_parameters(free_params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
+        #arr_transformed = transform_using_values(arr_moving, transform_params)
+        #mi = im.similarity_measure(arr_transformed, arr_ref)
+        mi = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
+        #mi_scaled = mi/(arr_ref.size)
+        #mi_scaled = similarity_measure_area_of_overlap(arr_ref, arr_moving, transform_params)
+        mi_scaled = mi
+        outside = _outside_limits(transform_params)
+        metric = 1/(mi_scaled + 1)
+        if outside:
+            fitted_params = _fit_params_to_bounds(transform_params)
+            fitted_params_scaled = free_params_to_guess(remove_locked_parameters(fitted_params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation))
+            #arr_transformed_fitted = transform_using_values(arr_moving, fitted_params)
+            #mi_fitted = im.similarity_measure(arr_transformed_fitted, arr_ref)/(arr_ref.size)
+            #mi_fitted = similarity_measure_area_of_overlap(arr_ref, arr_moving, fitted_params)
+            mi_fitted = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
+            #mi_fitted_scaled = mi_fitted/(arr_ref.size)
+            mi_fitted_scaled = mi_fitted
+            metric = np.float_(np.finfo(np.float_).max)
+            if mi_fitted_scaled > 0:
+                metric = 1/mi_fitted_scaled
+        if debug:
+            print((1/metric, free_params))
+        if outside:
+            assert 1/metric <= 1
+        else:
+            assert 1/metric >= 1
+        return metric
+    
+    #initial_guess = remove_locked_parameters(params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
+    initial_guess = free_params_to_guess(remove_locked_parameters(params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation))
+    
+    if basinhopping:
+        #optimisation_result = scipy.optimize.basinhopping(inverse_mutual_information_after_transform, initial_guess, T=0.5, minimizer_kwargs={'method': 'Powell'})
+        optimisation_result = scipy.optimize.basinhopping(inverse_mutual_information_after_transform, initial_guess, **basinhopping_kwargs)
+    else:
+        optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, initial_guess, method=method)
+    if debug:
+        print(optimisation_result)
+    """if optimisation_result.success:
+        #optimised_parameters = optimisation_result.x
+        optimised_parameters = guess_to_free_params(optimisation_result.x)
+        # If there is only one optimised parameter, optimisation_parameters will be of the form np.array(param), which has zero length.
+        # Otherwise, it will be of the form np.array([param1, param2, ...]).
+        # np.array(param) should therefore be converted to the form np.array([param]), which has length 1.
+        if len(optimised_parameters.shape) == 0:
+            optimised_parameters = np.array([optimised_parameters])
+        return fill_missing_parameters(optimised_parameters, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
+    else:
+        raise ValueError(optimisation_result.message)"""
+    optimised_parameters = guess_to_free_params(optimisation_result.x)
+    # If there is only one optimised parameter, optimisation_parameters will be of the form np.array(param), which has zero length.
+    # Otherwise, it will be of the form np.array([param1, param2, ...]).
+    # np.array(param) should therefore be converted to the form np.array([param]), which has length 1.
+    """if not basinhopping:
+        if len(optimised_parameters.shape) == 0:
+            optimised_parameters = np.array([optimised_parameters])"""
+    return fill_missing_parameters(optimised_parameters, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
 
         
 def optimise_affine_no_shear(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None, debug=False):
@@ -854,11 +1108,13 @@ def optimise_affine_no_shear(arr_moving: np.array, arr_ref: np.array, scale_x=1.
         #bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3), (-height, height), (-width, width)]
         bounds = [(0.7, 1.5), (0.7, 1.5), (-math.pi/6, math.pi/6), (-height*0.2, height*0.2), (-width*0.2, width*0.2)]
     def inverse_mutual_information_after_transform(parameters):
-        arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]])
+        #arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]])
         #arr_transformed = affine_from_list(arr_moving, [parameters[2], parameters[0], parameters[1], 0, 0, parameters[3], parameters[4]])
-        metric = 1/im.similarity_measure(arr_transformed, arr_ref)
+        #metric = 1/im.similarity_measure(arr_transformed, arr_ref)
+        #metric = 1/similarity_measure_area_of_overlap(arr_ref, arr_moving, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]])
+        metric = 1/similarity_measure_after_transform(arr_ref, arr_moving, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]])
         if debug:
-            print((1/metric, parameters))
+            print((1/metric, [parameters[0], parameters[1], 0, parameters[2], parameters[3], parameters[4]]))
         return metric
     optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [scale_x, scale_y, rotate_radians, offset_x, offset_y], method=method, bounds=bounds)
     if optimisation_result.success:
@@ -874,9 +1130,11 @@ def optimise_scale_and_rotation(arr_moving: np.array, arr_ref: np.array, scale_x
     if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
         bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
     def inverse_mutual_information_after_transform(parameters):
-        arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], 0, 0])
+        #arr_transformed = transform_using_values(arr_moving, [parameters[0], parameters[1], 0, parameters[2], 0, 0])
         #arr_transformed = affine_from_list(arr_moving, [parameters[2], parameters[0], parameters[1], 0, 0, 0, 0])
-        return 1/im.similarity_measure(arr_transformed, arr_ref)
+        #return 1/im.similarity_measure(arr_transformed, arr_ref)
+        #return 1/similarity_measure_area_of_overlap(arr_ref, arr_moving, [parameters[0], parameters[1], 0, parameters[2], 0, 0])
+        return 1/similarity_measure_after_transform(arr_ref, arr_moving, [parameters[0], parameters[1], 0, parameters[2], 0, 0])
     optimisation_result = scipy.optimize.minimize(inverse_mutual_information_after_transform, [scale_x, scale_y, rotate_radians], method=method, bounds=bounds)
     if optimisation_result.success:
         return optimisation_result.x
@@ -892,9 +1150,12 @@ def optimise_scale_and_rotation_best_of_two(arr_moving: np.array, arr_ref: np.ar
         bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
     result_1 = optimise_scale_and_rotation(arr_moving, arr_ref, rotate_radians=0.2, method=method, bounds=bounds)
     result_2 = optimise_scale_and_rotation(arr_moving, arr_ref, rotate_radians=-0.2, method=method, bounds=bounds)
-    transformed_1 = transform_using_values(arr_moving, [result_1[0], result_1[1], 0, result_1[2], 0, 0])
-    transformed_2 = transform_using_values(arr_moving, [result_2[0], result_2[1], 0, result_2[2], 0, 0])
-    if im.similarity_measure(transformed_1, arr_ref) > im.similarity_measure(transformed_2, arr_ref):
+    #transformed_1 = transform_using_values(arr_moving, [result_1[0], result_1[1], 0, result_1[2], 0, 0])
+    #transformed_2 = transform_using_values(arr_moving, [result_2[0], result_2[1], 0, result_2[2], 0, 0])
+    #if im.similarity_measure(transformed_1, arr_ref) > im.similarity_measure(transformed_2, arr_ref):
+    sm_1 = similarity_measure_after_transform(arr_ref, arr_moving, [result_1[0], result_1[1], 0, result_1[2], 0, 0])
+    sm_2 = similarity_measure_after_transform(arr_ref, arr_moving, [result_2[0], result_2[1], 0, result_2[2], 0, 0])
+    if sm_1 > sm_2:
         return result_1
     else:
         return result_2
@@ -913,7 +1174,9 @@ def optimise_affine_by_differential_evolution(arr_moving: np.array, arr_ref: np.
     Uses a global optimisation algorithm, specifically differential evolution, to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
     '''
     def inverse_mutual_information_after_transform(parameters):
-        return 1/im.similarity_measure(transform_using_values(arr_moving, parameters), arr_ref)
+        #return 1/im.similarity_measure(transform_using_values(arr_moving, parameters), arr_ref)
+        #return 1/similarity_measure_area_of_overlap(arr_ref, arr_moving, parameters)
+        return 1/similarity_measure_after_transform(arr_ref, arr_moving, parameters)
     if bounds is None:
         max_scale_factor = 2
         max_translate_factor = 0.2
@@ -1019,7 +1282,9 @@ def pyramid_affine(arr_moving: np.array, arr_ref: np.array, num_levels=3, regist
             new_params[4] *= height/new_height
             new_params[5] *= width/new_width
         combined_params = combine_affine_params(params, new_params)
-        if (im.similarity_measure(transform_using_values(arr_moving, combined_params), arr_ref) > im.similarity_measure(transform_using_values(arr_moving, params), arr_ref)):
+        sm_1 = similarity_measure_after_transform(arr_ref, arr_moving, params)
+        sm_2 = similarity_measure_after_transform(arr_ref, arr_moving, combined_params)
+        if (sm_2 > sm_1):
             params = combined_params
     return params
 
@@ -1045,7 +1310,9 @@ def pyramid_scale_and_translation(arr_moving: np.array, arr_ref: np.array, num_l
             new_params[4] *= height/new_height
             new_params[5] *= width/new_width
         combined_params = combine_affine_params(params, new_params)
-        if (im.similarity_measure(transform_using_values(arr_moving, combined_params), arr_ref) > im.similarity_measure(transform_using_values(arr_moving, params), arr_ref)):
+        sm_1 = similarity_measure_after_transform(arr_ref, arr_moving, params)
+        sm_2 = similarity_measure_after_transform(arr_ref, arr_moving, combined_params)
+        if (sm_2 > sm_1):
             params = combined_params
     return params
 
@@ -1063,36 +1330,54 @@ def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_leve
     return params
 
 
-def affine_signal_params(signal_in: hs.signals.Signal2D, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
+def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, reuse_estimates=False, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Applies `registration_method` to an entire image stack. Returns an array of parameter sets, one per image.
     '''
     num_images = signal_in.data.shape[0]
     params = np.empty((num_images, 6))
-    mi_max_index = highest_mutual_information_index(signal_in)
+    if arr_ref is None:
+        mi_max_index = highest_mutual_information_index(signal_in)
+        arr_ref = signal_in.data[mi_max_index]
+    def _get_initial_guess_kwargs(initial_guess):
+        initial_guess_kwargs = {}
+        if len(initial_guess) == 6:
+            initial_guess_kwargs['scale_x'] = initial_guess[0]
+            initial_guess_kwargs['scale_y'] = initial_guess[1]
+            initial_guess_kwargs['shear_radians'] = initial_guess[2]
+            initial_guess_kwargs['rotate_radians'] = initial_guess[3]
+            initial_guess_kwargs['offset_x'] = initial_guess[4]
+            initial_guess_kwargs['offset_y'] = initial_guess[5]
+        return initial_guess_kwargs
+    initial_guess_kwargs = {}
     for t in range(num_images):
         print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
         if reg_args is None:
-            params[t] = registration_method(signal_in.data[t], signal_in.data[mi_max_index], **reg_kwargs)
+            params[t] = registration_method(signal_in.data[t], arr_ref, **initial_guess_kwargs, **reg_kwargs)
         else:
-            params[t] = registration_method(signal_in.data[t], signal_in.data[mi_max_index], *reg_args, **reg_kwargs)
+            params[t] = registration_method(signal_in.data[t], arr_ref, *reg_args, **initial_guess_kwargs, **reg_kwargs)
+        if reuse_estimates:
+            initial_guess_kwargs = _get_initial_guess_kwargs(params[t])
+            print(initial_guess_kwargs)
     return params
 
 
-def pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, num_levels=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
+def pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, num_levels=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Applies `pyramid_affine` to an entire image stack. Returns an array of parameter sets, one per image.
     '''
     num_images = signal_in.data.shape[0]
     params = np.empty((num_images, 6))
-    mi_max_index = highest_mutual_information_index(signal_in)
+    if arr_ref is None:
+        mi_max_index = highest_mutual_information_index(signal_in)
+        arr_ref = signal_in.data[mi_max_index]
     for t in range(num_images):
         print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
-        params[t] = pyramid_affine(signal_in.data[t], signal_in.data[mi_max_index], num_levels=num_levels, registration_method=registration_method, reg_args=reg_args, reg_kwargs=reg_kwargs)
+        params[t] = pyramid_affine(signal_in.data[t], arr_ref, num_levels=num_levels, registration_method=registration_method, reg_args=reg_args, reg_kwargs=reg_kwargs)
     return params
 
 
-def apply_affine_params_to_signal(signal_in: hs.signals.Signal2D, params: np.array):
+def apply_affine_params_to_signal(signal_in: hs.signals.Signal2D, params: np.array, cval_mean=True):
     '''
     Takes an image stack and a corresponding list of affine parameter sets. Returns a signal representing the result of applying each of these parameter sets to the corresponding image in `signal_in`.
     '''
@@ -1102,5 +1387,5 @@ def apply_affine_params_to_signal(signal_in: hs.signals.Signal2D, params: np.arr
     assert params.shape[1] == 6
     signal_out = hs.signals.Signal2D(np.empty_like(signal_in.data))
     for t in range(num_images):
-        signal_out.data[t] = transform_using_values(signal_in.data[t], params[t])
+        signal_out.data[t] = transform_using_values(signal_in.data[t], params[t], cval_mean=cval_mean)
     return signal_out

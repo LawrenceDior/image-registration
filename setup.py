@@ -76,12 +76,13 @@ num_keyframes = 3
 num_between_keyframes = 6
 num_frames = (num_between_keyframes + 1) * num_keyframes
 key_indices = np.arange(num_keyframes + 1) * (num_between_keyframes+1) # 0, 3, 6, 9
-key_scale_x = np.random.rand(num_keyframes + 1) * 0.4 + 0.8
-key_scale_y = np.random.rand(num_keyframes + 1) * 0.4 + 0.8
-key_shear = np.random.rand(num_keyframes + 1) * (2*math.pi/12) - math.pi/12
-key_rotation = np.random.rand(num_keyframes + 1) * (2*math.pi/6) - math.pi/6
-key_offset_x = np.random.rand(num_keyframes + 1) * (0.4 * height) - (0.2 * height)
-key_offset_y = np.random.rand(num_keyframes + 1) * (0.4 * width) - (0.2 * width)
+np.random.seed(0)
+key_scale_x = np.random.rand(num_keyframes + 1) * 0.4 + 0.8 # 0.8-1.2
+key_scale_y = np.random.rand(num_keyframes + 1) * 0.4 + 0.8 # 0.8-1.2
+key_shear = np.random.rand(num_keyframes + 1) * (2*math.pi/12) - math.pi/12 # -pi/12 to +pi/12
+key_rotation = np.random.rand(num_keyframes + 1) * (2*math.pi/6) - math.pi/6 # -pi/6 to +pi/6
+key_offset_x = np.random.rand(num_keyframes + 1) * (0.4 * height) - (0.2 * height) # -height/5 to +height/5
+key_offset_y = np.random.rand(num_keyframes + 1) * (0.4 * width) - (0.2 * width) # -width/5 to +width/5
 key_scale_x[-1] = key_scale_x[0]
 key_scale_y[-1] = key_scale_y[0]
 key_shear[-1] = key_shear[0]
@@ -102,4 +103,15 @@ all_offset_x = spline_offset_x(np.arange(0, num_frames))
 all_offset_y = spline_offset_y(np.arange(0, num_frames))
 signal_A_2 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
 for t in range(num_frames):
-    signal_A_2.data[t] = ipm.transform_using_values(arr_A, [all_scale_x[t], all_scale_y[t], all_shear[t], all_rotation[t], all_offset_x[t], all_offset_y[t]])
+    signal_A_2.data[t] = ipm.transform_using_values(arr_A, [all_scale_x[t], all_scale_y[t], all_shear[t], all_rotation[t], all_offset_x[t], all_offset_y[t]], cval_mean=True)
+
+# Synthetic signal with less variation than signal_A_2
+signal_A_3 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
+for t in range(num_frames):
+    scale_x = (all_scale_x[t] - 1) * 0.25 + 1 # 0.95-1.05
+    scale_y = (all_scale_y[t] - 1) * 0.25 + 1 # 0.95-1.05
+    shear = all_shear[t] # -pi/12 to +pi/12
+    rotation = all_rotation[t] / 2 # -pi/12 to +pi/12
+    offset_x = all_offset_x[t] / 2 # -height/10 to +height/10
+    offset_y = all_offset_y[t] / 2 # -width/10 to +width/10
+    signal_A_3.data[t] = ipm.transform_using_values(arr_A, [scale_x, scale_y, shear, rotation, offset_x, offset_y], cval_mean=True)
