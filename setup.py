@@ -34,6 +34,9 @@ signal_3 = signal_3.transpose(signal_axes=(0,2))
 signal_4 = hs.load("data/0005-RotSTEM90 ADF1.dm3")
 signal_5 = hs.load("data/20_Aligned 20-Stack-5MxHAADF STACK(20).dm3")
 
+signal_1_reduced = hs.signals.Signal2D(signal_1.data[:115][::5])
+signal_2_reduced = hs.signals.Signal2D(signal_2.data[::5])
+
 # Generate a very simple synthetic signal for demonstration purposes
 
 height = 38

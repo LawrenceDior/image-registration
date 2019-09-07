@@ -2,10 +2,16 @@ import cv2
 import hyperspy.api as hs
 import math
 import image_metrics as im
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy
 import SimpleITK as sitk
 import skimage
+from time import gmtime, strftime, time
+
+
+def print_time(msg: str, since: float=0.0):
+    print("[" + strftime("%H:%M:%S", gmtime(time()-since)) + "] " + msg)
 
 
 def get_deltas(signal_in: hs.signals.Signal2D, absolute=False, normalised=True):
@@ -22,6 +28,24 @@ def get_deltas(signal_in: hs.signals.Signal2D, absolute=False, normalised=True):
     if normalised:
         arr_out -= arr_out.min()
         arr_out *= (1/arr_out.max())
+    return hs.signals.Signal2D(arr_out)
+
+
+def get_delta_signs(signal_in: hs.signals.Signal2D, normalised=True):
+    '''
+    Sign of difference between previous and current intensity of each pixel.
+    '''
+    num_images = signal_in.data.shape[0]
+    arr_out = np.zeros(signal_in.data.shape)
+    for t in range(num_images):
+        index_prev = max(0, t-1)
+        index_next = min(t+1, num_images-1)
+        image_prev = signal_in.data[index_prev]
+        image_next = signal_in.data[index_next]
+        if normalised:
+            image_prev = normalised_image(image_prev)
+            image_next = normalised_image(image_next)
+        arr_out[t] = np.sign(np.subtract(image_next, image_prev))
     return hs.signals.Signal2D(arr_out)
 
 
@@ -66,6 +90,19 @@ def normalised_image(arr_in: np.array):
     if arr_in.max() == arr_in.min():
         return np.ones_like(arr_in) * max(0, min(1, arr_in.max()))
     return (arr_in - arr_in.min()) / (arr_in.max() - arr_in.min())
+
+
+def normalised_average_of_signal(signal_in: hs.signals.Signal2D):
+    '''
+    Normalise all images in a stack and return the average of the normalised images.
+    '''
+    assert len(signal_in.data.shape) == 3
+    (num_images, height, width) = signal_in.data.shape
+    data_normalised_sum = np.zeros((height, width), dtype=float)
+    for t in range(num_images):
+        data_normalised_sum += normalised_image(signal_in.data[t])
+    return data_normalised_sum / num_images
+    
 
 
 def get_neighbour_similarity(arr_in: np.array, exponent=2, print_progress=False):
@@ -500,7 +537,46 @@ def make_capital_A(shape: tuple):
     return cond.astype(np.float64)
 
 
-def horn_schunck(signal_in: hs.signals.Signal2D, alpha_squared: float, num_iterations: int, use_average=False):
+def horn_schunck(data_in: np.array, alpha_squared: float, num_iterations: int, use_average=False):
+    '''
+    Horn-Schunck method for optical flow.
+    Outputs a series of (vertical, horizontal) displacement field pairs obtained from a corresponding series of 2D images.
+    
+    The larger `alpha_squared` is, the more strongly departure from smoothness is penalised relative to rate of change of brightness.
+    When `alpha_squared` = 1, both kinds of error are weighted equally.
+    When `use_average` is True, each displacement field has the same (u,v) values for all pixels. The value used is the mean of the individual values.
+    '''
+    assert len(data_in.shape) == 3
+    (num_images, height, width) = data_in.shape
+    # Estimate derivatives of intensity wrt x, y and t
+    I_x = ndi.filters.convolve(data_in, np.array([[[-1,-1],[1,1]],[[-1,-1],[1,1]]])*0.25)
+    I_y = ndi.filters.convolve(data_in, np.array([[[-1,1],[-1,1]],[[-1,1],[-1,1]]])*0.25)
+    I_t = ndi.filters.convolve(data_in, np.array([[[-1,-1],[-1,-1]],[[1,1],[1,1]]])*0.25)
+    u = np.zeros(data_in.shape)
+    v = np.zeros(data_in.shape)
+    kernel = np.array([[1,2,1],[2,0,2],[1,2,1]])/12
+    for t in range(num_images):
+        u_t = np.zeros((height, width))
+        v_t = np.zeros((height, width))
+        for _ in range(num_iterations):
+            u_mean = ndi.filters.convolve(u_t, kernel)
+            v_mean = ndi.filters.convolve(v_t, kernel)
+            I_coefficient = (I_x[t] * u_mean + I_y[t] * v_mean + I_t[t]) / (alpha_squared + I_x[t]**2 + I_y[t]**2)
+            u_t = u_mean - I_x[t] * I_coefficient
+            v_t = v_mean - I_y[t] * I_coefficient
+            if (np.array_equal(u_t, u[t]) and np.array_equal(v_t, v[t])):
+                break
+            u[t] = u_t
+            v[t] = v_t
+        if (use_average):
+            u_avg = u[t].mean()
+            v_avg = v[t].mean()
+            u[t] = np.ones(u[t].shape) * u_avg
+            v[t] = np.ones(v[t].shape) * v_avg
+    return (u,v)
+
+
+def horn_schunck_signal(signal_in: hs.signals.Signal2D, alpha_squared: float, num_iterations: int, use_average=False):
     '''
     Horn-Schunck method for optical flow.
     Outputs a series of (vertical, horizontal) displacement field pairs obtained from a corresponding series of 2D images.
@@ -558,6 +634,65 @@ def displace_signal_using_horn_schunck_repeatedly(signal_in: hs.signals.Signal2D
         signal_out = hs.signals.Signal2D(data_out)
     return signal_out
 
+
+def nonrigid_pyramid(signal_in: hs.signals.Signal2D, num_levels=3, max_dimension=64, registration_method=horn_schunck, reg_args=None, reg_kwargs={}):
+    assert len(signal_in.data.shape) == 3
+    (num_images, height, width) = signal_in.data.shape
+    
+    # Ensure the maximum dimension of images to be processed is no greater than max_image_dimension.
+    height_resized = height
+    width_resized = width
+    if max_image_dimension == -1:
+        max_image_dimension = max(height, width)
+    else:
+        assert max_image_dimension > 0
+    resize_image = height > max_image_dimension or width > max_image_dimension
+    if resize_image:
+        if height > width:
+            height_resized = max_image_dimension
+            width_resized = int(max_image_dimension * width / height)
+        else:
+            width_resized = max_image_dimension
+            height_resized = int(max_image_dimension * height / width)
+        print("height_resized = " + str(height_resized) + ", width_resized = " + str(width_resized))
+        
+    us = np.zeros(data_in.shape)
+    vs = np.zeros(data_in.shape)
+    
+    images_resized = np.zeros((num_images, height_resized, width_resized))
+    if resize_image:
+        for t in range(num_images):
+            images_resized[t] += skimage.transform.resize(signal_in.data[t], (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+    else:
+        for t in range(num_images):
+            images_resized[t] += signal_in.data[t]
+    
+    # Pyramid loop
+    for n in range(num_levels):
+        power_of_2 = num_levels - 1 - n
+        print("power_of_2 = " + str(power_of_2))
+        (new_height, new_width) = (height_resized//(2**power_of_2), width_resized//(2**power_of_2))
+        if new_height < 2 or new_width < 2:
+            continue
+        new_us = np.zeros((num_images, new_height, new_width))
+        new_vs = np.zeros((num_images, new_height, new_width))
+        
+        images_downsampled = np.zeros((num_images, new_height, new_width))
+        # TODO: apply displacement field (us, vs) to signal_in.data
+        if power_of_2 > 0:
+            for t in range(num_images):
+                images_downsampled[t] += skimage.transform.resize(signal_in.data[t], (new_height, new_width), mode='reflect', anti_aliasing=True)
+        else:
+            for t in range(num_images):
+                images_downsampled[t] += images_resized[t]
+        
+        # Estimate displacement fields
+        if reg_args is None:
+            (new_us, new_vs) = registration_method(images_downsampled, **reg_kwargs)
+        else:
+            (new_us, new_vs) = registration_method(images_downsampled, *reg_args, **reg_kwargs)
+        
+        # TODO: interpolate (new_us, new_vs) to give (us, vs)
 
 def nonrigid(im_stack, demons_it = 20, filter_size = 5.0, max_it = 3, default_pixel_value = 100):
     '''
@@ -636,7 +771,6 @@ def nonrigid(im_stack, demons_it = 20, filter_size = 5.0, max_it = 3, default_pi
         max_disp = np.max(dispfield)
             
         # Terminate early if no part of the (last) image has been displaced by more than 1 pixel.
-        # (Is this wise?)
         #if max_disp < 1.0:
         #    print("NRR stopped after "+str(j)+" iterations.")
         #    break
@@ -650,6 +784,77 @@ def mutual_information(arr_1: np.array, arr_2: np.array):
     Returns the mutual information between arr_1 and arr_2.
     '''
     return im.mutual_information(arr_1.flatten(), arr_2.flatten())
+
+
+def get_percentile_masks(arr_in: np.array, max_groups=3):
+    # arr_in will probably be a neighbour similarity array based on a reference image.
+    assert max_groups >= 1
+    # Each group must have at least 4 elements
+    num_groups = min(max_groups, arr_in.size//4)
+    group_list = []
+    for i in range(num_groups):
+        lower_limit = np.percentile(arr_in, 100 * i/num_groups)
+        upper_limit = np.percentile(arr_in, 100 * (i+1)/num_groups)
+        if i == num_groups-1:
+            upper_limit += 1
+        current_group = np.logical_and(arr_in >= lower_limit, arr_in < upper_limit).astype(np.int32)
+        merge_with_previous_group = False
+        if i > 0:
+            current_group_size = current_group.sum()
+            previous_group_size = group_list[-1].sum()
+            if previous_group_size < 4 or current_group_size < 4:
+                merge_with_previous_group = True
+        if merge_with_previous_group:
+            group_list[-1] += current_group
+            assert group_list[-1].max() == 1
+        else:
+            group_list.append(current_group)
+    return group_list
+
+
+def similarity_measure_using_neighbour_similarity(arr_moving: np.array, arr_ref: np.array, arr_ref_ns: np.array, values: list, debug=False, max_groups=3):
+    assert arr_moving.shape == arr_ref.shape
+    assert arr_ref_ns.shape == arr_ref.shape
+    arr_transformed = transform_using_values(arr_moving, values, cval=float('-inf'))
+    transform_mask = (arr_transformed >= arr_moving.min()-1).astype(np.int32)
+    if transform_mask.max() != 1:
+        #print("transform_mask.max(): ", transform_mask.max())
+        #print("values: ", values)
+        return 0
+    #assert transform_mask.max() == 1
+    #arr_ref_ns = get_neighbour_similarity(arr_ref)
+    group_list = get_percentile_masks(arr_ref_ns, max_groups=max_groups)
+    percentile_masks = []
+    max_num_masks = len(group_list)
+    for i in range(max_num_masks):
+        current_group = group_list[i] * transform_mask
+        merge_with_previous_group = False
+        if i > 0:
+            current_group_size = current_group.sum()
+            previous_group_size = percentile_masks[-1].sum()
+            if previous_group_size < 4 or current_group_size < 4:
+                merge_with_previous_group = True
+        if merge_with_previous_group:
+            percentile_masks[-1] += current_group
+        else:
+            percentile_masks.append(current_group)
+    num_masks = len(percentile_masks)
+    percentile_averages = np.empty(num_masks)
+    similarity_measures = np.zeros(num_masks)
+    for i in range(num_masks):
+        mask = percentile_masks[i]
+        denominator = max(1, mask.sum())
+        percentile_averages[i] = (arr_ref_ns * mask).sum() / denominator
+        if mask.sum() >= 4:
+            arr_transformed_reduced = arr_transformed.ravel()[np.where(mask.ravel() == 1)]
+            arr_ref_reduced = arr_ref.ravel()[np.where(mask.ravel() == 1)]
+            similarity_measures[i] = im.similarity_measure(np.array(arr_transformed_reduced), np.array(arr_ref_reduced), measure="NMI")
+    denominator = max(1, percentile_averages.sum())
+    similarity_measures *= percentile_averages/denominator
+    sm = similarity_measures.sum()
+    assert sm >= 0
+    assert sm <= 1
+    return sm
 
 
 def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
@@ -675,7 +880,8 @@ def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np
     if len(arr_1_reduced) < 3:
         return 0
     else:
-        sm = im.mutual_information(arr_1_reduced, arr_2_reduced) * len(arr_1_reduced) / len(arr_1)
+        #sm = im.mutual_information(arr_1_reduced, arr_2_reduced) * len(arr_1_reduced) / len(arr_1)
+        sm = im.similarity_measure(np.array(arr_1_reduced), np.array(arr_2_reduced), measure="NMI")
         if debug:
             mi = im.mutual_information(arr_1, transform_using_values(arr_to_transform, values, cval_mean=True).ravel())
             print((mi, sm))
@@ -684,7 +890,11 @@ def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np
 def similarity_measure_after_transform(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
     assert arr_fixed.shape == arr_to_transform.shape
     arr_transformed = transform_using_values(arr_to_transform, values, cval=float('-1'))
-    return im.similarity_measure(normalised_image(arr_fixed), normalised_image(arr_transformed), measure="NMI")
+    sm = im.similarity_measure(arr_fixed, arr_transformed, measure="NMI")
+    if debug:
+        sm2 = im.similarity_measure(normalised_image(arr_fixed), normalised_image(arr_transformed), measure="NMI")
+        print("Similarity measure comparison: ", (sm, sm2))
+    return sm
 
 
 def split_by_mutual_information(signal_in: hs.signals.Signal2D, threshold=0.3):
@@ -728,6 +938,21 @@ def highest_mutual_information_index(signal_in: hs.signals.Signal2D, exponent=1)
             mi_total += im.similarity_measure(signal_in.data[t], signal_in.data[t2])**exponent
         if mi_total > mi_max:
             mi_max = mi_total
+            mi_max_index = t
+    return mi_max_index
+
+
+def highest_mutual_information_index_faster(signal_in: hs.signals.Signal2D):
+    '''
+    Iterates over an image stack. For each image, the the mutual information between that image and the average image is calculated. The index of the image for which this value is greatest is returned.
+    '''
+    mi_max = 0.0
+    mi_max_index = 0
+    arr_avg = normalised_average_of_signal(signal_in)
+    for t in range(signal_in.data.shape[0]):
+        mi = im.similarity_measure(signal_in.data[t], arr_avg, measure="NMI")
+        if mi > mi_max:
+            mi_max = mi
             mi_max_index = t
     return mi_max_index
 
@@ -787,14 +1012,14 @@ def skimage_estimate_shift(arr_moving: np.array, arr_ref: np.array, upsample_fac
     return skimage.feature.register_translation(arr_moving, arr_ref, upsample_factor=upsample_factor, space='real', return_error=False)
 
 
-def shift(arr_in: np.array, offset_x, offset_y):
+def shift(arr_in: np.array, offset_x, offset_y, cval=-1, cval_mean=False):
     '''
     Shifts `arr_in` down by `offset_x` pixels and right by `offset_y` pixels.
     '''
-    return transform_using_values(arr_in, [1, 1, 0, 0, offset_x, offset_y])
+    return transform_using_values(arr_in, [1, 1, 0, 0, offset_x, offset_y], cval=cval, cval_mean=cval_mean)
 
 
-def shift_signal(signal_in: hs.signals.Signal2D, shifts: np.array):
+def shift_signal(signal_in: hs.signals.Signal2D, shifts: np.array, cval=-1, cval_mean=False):
     '''
     Shifts each image in `signal_in` by an amount specified by the corresponding element of `shifts`.
     Shifts are in horizontal, vertical order.
@@ -802,17 +1027,17 @@ def shift_signal(signal_in: hs.signals.Signal2D, shifts: np.array):
     assert shifts.shape == (signal_in.data.shape[0], 2)
     signal_out = hs.signals.Signal2D(np.empty_like(signal_in.data))
     for t in range(signal_in.data.shape[0]):
-        signal_out.data[t] = shift(signal_in.data[t], shifts[t][0], shifts[t][1])
+        signal_out.data[t] = shift(signal_in.data[t], shifts[t][0], shifts[t][1], cval=cval, cval_mean=cval_mean)
     return signal_out
 
 
-def correct_shifts_vh(signal_in: hs.signals.Signal2D, shifts: np.array):
+def correct_shifts_vh(signal_in: hs.signals.Signal2D, shifts: np.array, cval=-1, cval_mean=False):
     '''
     Corrects for shifts in `signal_in`, specified by `shifts`, by applying the shifts in reverse.
     Shifts are in vertical, horizontal order.
     '''
     assert shifts.shape == (signal_in.data.shape[0], 2)
-    return shift_signal(signal_in, -np.flip(shifts, 1))
+    return shift_signal(signal_in, -np.flip(shifts, 1), cval=cval, cval_mean=cval_mean)
     
 
 def cartesian_to_log_polar(arr_in: np.array):
@@ -996,8 +1221,10 @@ def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, sca
     (height, width) = arr_moving.shape
     if bounds is None:
         bounds = np.array([(0.5, 2), (0.5, 2), (-math.pi/6, math.pi/6), (-math.pi/6, math.pi/6), (-height*0.2, height*0.2), (-width*0.2, width*0.2)])
+    arr_ref_ns = get_neighbour_similarity(arr_ref)
         
     def free_params_to_guess(params):
+        assert len(params) <= 6
         if not scale_bounds:
             return params
         bounds_reduced = remove_locked_parameters(bounds, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
@@ -1009,11 +1236,16 @@ def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, sca
             p_range = p_max - p_min
             scaled = (params[p] - p_avg)/(p_range/2)
             params_scaled.append(scaled)
+        assert len(params_scaled) <= 6
         return params_scaled
     
     def guess_to_free_params(params_scaled):
         if len(params_scaled.shape) == 0:
             params_scaled = np.array([params_scaled])
+        if len(params_scaled) > 6:
+            print("params_scaled is too long!")
+            print(params_scaled)
+        assert len(params_scaled) <= 6
         if not scale_bounds:
             return params_scaled
         bounds_reduced = remove_locked_parameters(bounds, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
@@ -1025,6 +1257,7 @@ def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, sca
             p_range = p_max - p_min
             param = p_avg + params_scaled[p] * p_range/2
             params.append(param)
+        assert len(params) <= 6
         return params
     
     def inverse_mutual_information_after_transform(params_scaled):
@@ -1042,9 +1275,10 @@ def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, sca
         transform_params = fill_missing_parameters(free_params, isotropic_scaling, lock_scale, lock_shear, lock_rotation, lock_translation)
         #arr_transformed = transform_using_values(arr_moving, transform_params)
         #mi = im.similarity_measure(arr_transformed, arr_ref)
-        mi = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
+        #mi = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
         #mi_scaled = mi/(arr_ref.size)
         #mi_scaled = similarity_measure_area_of_overlap(arr_ref, arr_moving, transform_params)
+        mi = similarity_measure_using_neighbour_similarity(arr_moving, arr_ref, arr_ref_ns, transform_params, debug=debug, max_groups=6)
         mi_scaled = mi
         outside = _outside_limits(transform_params)
         metric = 1/(mi_scaled + 1)
@@ -1054,8 +1288,9 @@ def optimise_affine_v2(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, sca
             #arr_transformed_fitted = transform_using_values(arr_moving, fitted_params)
             #mi_fitted = im.similarity_measure(arr_transformed_fitted, arr_ref)/(arr_ref.size)
             #mi_fitted = similarity_measure_area_of_overlap(arr_ref, arr_moving, fitted_params)
-            mi_fitted = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
+            #mi_fitted = similarity_measure_after_transform(arr_ref, arr_moving, transform_params)
             #mi_fitted_scaled = mi_fitted/(arr_ref.size)
+            mi_fitted = similarity_measure_using_neighbour_similarity(arr_moving, arr_ref, arr_ref_ns, fitted_params, debug=debug, max_groups=6)
             mi_fitted_scaled = mi_fitted
             metric = np.float_(np.finfo(np.float_).max)
             if mi_fitted_scaled > 0:
@@ -1330,15 +1565,48 @@ def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_leve
     return params
 
 
-def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, reuse_estimates=False, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
+def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, use_normalised_average_as_reference=False, reuse_estimates=False, max_image_dimension=-1, continue_until_no_improvement=False, improvement_threshold=0.1, significant_improvement=0.05, max_num_passes=20, num_levels=1, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Applies `registration_method` to an entire image stack. Returns an array of parameter sets, one per image.
     '''
-    num_images = signal_in.data.shape[0]
-    params = np.empty((num_images, 6))
+    assert len(signal_in.data.shape) == 3
+    start_time = time()
+    (num_images, height, width) = signal_in.data.shape
+    params = np.array([1, 1, 0, 0, 0, 0], dtype=float) * np.ones((num_images, 1))
+    # Ensure a reference image is set.
+    mi_max_index = -1
+    mi_max = 0
+    if use_normalised_average_as_reference:
+        arr_ref = normalised_average_of_signal(signal_in)
     if arr_ref is None:
+        print("Obtaining arr_ref...")
         mi_max_index = highest_mutual_information_index(signal_in)
         arr_ref = signal_in.data[mi_max_index]
+        mi_max = im.similarity_measure(normalised_image(arr_ref), normalised_image(arr_ref), measure="NMI")
+        print("arr_ref obtained (frame " + str(mi_max_index+1) + " of " + str(num_images) + ").")
+    # Validate improvement_threshold
+    assert improvement_threshold >= 0
+    assert improvement_threshold < 1
+    # Ensure the maximum dimension of images to be processed is no greater than max_image_dimension.
+    height_resized = height
+    width_resized = width
+    arr_ref_resized = arr_ref
+    if max_image_dimension == -1:
+        max_image_dimension = max(height, width)
+    else:
+        assert max_image_dimension > 0
+    resize_image = height > max_image_dimension or width > max_image_dimension
+    if resize_image:
+        if height > width:
+            height_resized = max_image_dimension
+            width_resized = int(max_image_dimension * width / height)
+        else:
+            width_resized = max_image_dimension
+            height_resized = int(max_image_dimension * height / width)
+        print("height_resized = " + str(height_resized) + ", width_resized = " + str(width_resized))
+        # Resize reference image to conform to max_image_dimension.
+        arr_ref_resized = skimage.transform.resize(arr_ref, (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+    arr_ref_resized_ns = get_neighbour_similarity(arr_ref_resized)
     def _get_initial_guess_kwargs(initial_guess):
         initial_guess_kwargs = {}
         if len(initial_guess) == 6:
@@ -1349,16 +1617,210 @@ def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, reuse_est
             initial_guess_kwargs['offset_x'] = initial_guess[4]
             initial_guess_kwargs['offset_y'] = initial_guess[5]
         return initial_guess_kwargs
+    def _get_random_initial_guess_kwargs(initial_guess):
+        initial_guess_kwargs = {}
+        initial_guess_kwargs['scale_x'] = np.random.rand()
+        initial_guess_kwargs['scale_y'] = np.random.rand()
+        initial_guess_kwargs['shear_radians'] = np.random.rand()
+        initial_guess_kwargs['rotate_radians'] = np.random.rand()
+        initial_guess_kwargs['offset_x'] = np.random.rand()
+        initial_guess_kwargs['offset_y'] = np.random.rand()
+        if 'bounds' in reg_kwargs:
+            bounds = reg_kwargs['bounds']
+            initial_guess_kwargs['scale_x'] = initial_guess_kwargs['scale_x'] * (bounds[0][1] - bounds[0][0]) + bounds[0][0]
+            initial_guess_kwargs['scale_y'] = initial_guess_kwargs['scale_y'] * (bounds[1][1] - bounds[1][0]) + bounds[1][0]
+            initial_guess_kwargs['shear_radians'] = initial_guess_kwargs['shear_radians'] * (bounds[2][1] - bounds[2][0]) + bounds[2][0]
+            initial_guess_kwargs['rotate_radians'] = initial_guess_kwargs['rotate_radians'] * (bounds[3][1] - bounds[3][0]) + bounds[3][0]
+            initial_guess_kwargs['offset_x'] = initial_guess_kwargs['offset_x'] * (bounds[4][1] - bounds[4][0]) + bounds[4][0]
+            initial_guess_kwargs['offset_y'] = initial_guess_kwargs['offset_y'] * (bounds[5][1] - bounds[5][0]) + bounds[5][0]
+        initial_guess_kwargs['scale_x'] = 0.5 * (initial_guess[0] + initial_guess_kwargs['scale_x'])
+        initial_guess_kwargs['scale_y'] = 0.5 * (initial_guess[1] + initial_guess_kwargs['scale_y'])
+        initial_guess_kwargs['shear_radians'] = 0.5 * (initial_guess[2] + initial_guess_kwargs['shear_radians'])
+        initial_guess_kwargs['rotate_radians'] = 0.5 * (initial_guess[3] + initial_guess_kwargs['rotate_radians'])
+        initial_guess_kwargs['offset_x'] = 0.5 * (initial_guess[4] + initial_guess_kwargs['offset_x'])
+        initial_guess_kwargs['offset_y'] = 0.5 * (initial_guess[5] + initial_guess_kwargs['offset_y'])
+        return initial_guess_kwargs
     initial_guess_kwargs = {}
-    for t in range(num_images):
-        print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
-        if reg_args is None:
-            params[t] = registration_method(signal_in.data[t], arr_ref, **initial_guess_kwargs, **reg_kwargs)
-        else:
-            params[t] = registration_method(signal_in.data[t], arr_ref, *reg_args, **initial_guess_kwargs, **reg_kwargs)
-        if reuse_estimates:
-            initial_guess_kwargs = _get_initial_guess_kwargs(params[t])
-            print(initial_guess_kwargs)
+    
+    count_down = False
+    def _i_to_t(i):
+        t = min(num_images-1, max(0, i))
+        if count_down:
+            t = num_images - 1 - t
+        return t
+    
+    # Track worst, average and best similarity measures.
+    sm_worst_list_list = []
+    sm_avg_list_list = []
+    sm_best_list_list = []
+    
+    # Outer (pyramid) loop
+    for n in range(num_levels):
+        power_of_2 = num_levels - 1 - n
+        print_time("power_of_2 = " + str(power_of_2), start_time)
+        (new_height, new_width) = (height_resized//(2**power_of_2), width_resized//(2**power_of_2))
+        if new_height < 2 or new_width < 2:
+            continue
+            
+        # Downsample reference image if necessary.
+        arr_ref_downsampled = arr_ref_resized
+        if power_of_2 > 0:
+            arr_ref_downsampled = skimage.transform.resize(arr_ref_resized, (new_height, new_width), mode='reflect', anti_aliasing=True)
+            
+        num_not_improved = 0
+        num_passes = 0
+        not_improved_counts = np.zeros(num_images)
+        most_significant_improvement = 1
+        
+        #print_messages = power_of_2 == 0
+        #print_messages = False
+        print_messages = True
+    
+        # Track worst, average and best similarity measures.
+        sm_worst_list = []
+        sm_best_list = []
+        sm_avg_list = []
+            
+        while num_not_improved < (1-improvement_threshold)*num_images and num_passes < max_num_passes and most_significant_improvement > significant_improvement:
+            num_not_improved = num_images
+            if continue_until_no_improvement:
+                num_not_improved = 0
+            if use_normalised_average_as_reference:
+                print_time("Updating reference image...", start_time)
+                signal_transformed = apply_affine_params_to_signal(signal_in, params)
+                arr_ref = normalised_average_of_signal(signal_transformed)
+                print("Reference image updated.")
+                arr_ref_resized = arr_ref
+                if resize_image:
+                    # Resize reference image to conform to max_image_dimension.
+                    arr_ref_resized = skimage.transform.resize(arr_ref, (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+                plt.matshow(np.hstack((arr_ref_resized, arr_ref_resized_ns)))
+                arr_ref_resized_ns = get_neighbour_similarity(arr_ref_resized)
+                print("Reference image neighbour similarity updated.")
+                # Downsample reference image if necessary.
+                arr_ref_downsampled = arr_ref_resized
+                if power_of_2 > 0:
+                    arr_ref_downsampled = skimage.transform.resize(arr_ref_resized, (new_height, new_width), mode='reflect', anti_aliasing=True)
+                    
+            most_significant_improvement = 0
+            sm_worst = 1
+            sm_best = 0
+            sm_total = 0
+            for i in range(num_images):
+                t = _i_to_t(i)
+                t_prev = _i_to_t(i-1)
+                if print_messages:
+                    print_time("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images), start_time)
+
+                # Resize moving image to conform to max_image_dimension.
+                image_resized = signal_in.data[t]
+                if resize_image:
+                    image_resized = skimage.transform.resize(signal_in.data[t], (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+
+                # If reusing estimates is unlikely to help, introduce some randomness to the initial guess.
+                used_randomisation = False
+                if reuse_estimates and not_improved_counts[t_prev] > 1:
+                    if not_improved_counts[t] < 5:
+                        if print_messages:
+                            print("Randomising initial guess.")
+                        initial_guess_kwargs = _get_random_initial_guess_kwargs(params[t])
+                        used_randomisation = True
+                    else:
+                        not_improved_counts[t] += 1
+                        num_not_improved += 1
+                        print("Frame " + str(t+1) + " will be skipped.")
+                        if print_messages:
+                            print("num_not_improved = " + str(num_not_improved))
+                        continue
+                        
+                    
+                """if continue_until_no_improvement:
+                    not_improved_counts[t] += 1
+                    num_not_improved += 1
+                    if print_messages:
+                        print("num_not_improved = " + str(num_not_improved))"""
+
+                # Save current best estimate and allocate space for a new estimate.
+                old_params = params[t]
+                new_params = np.empty(6, dtype=float)
+                
+                # Downsample moving image if necessary.
+                arr_moving_downsampled = image_resized
+                if power_of_2 > 0:
+                    arr_moving_downsampled = skimage.transform.resize(image_resized, (new_height, new_width), mode='reflect', anti_aliasing=True)
+                    
+                # Estimate parameters
+                if reg_args is None:
+                    new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, **initial_guess_kwargs, **reg_kwargs)
+                else:
+                    new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, *reg_args, **initial_guess_kwargs, **reg_kwargs)
+
+                # Computed offsets must be scaled up
+                if power_of_2 > 0:
+                    new_params[4] *= height_resized/new_height
+                    new_params[5] *= width_resized/new_width
+                
+                # Compare similarity measure before and after
+                #sm_old = similarity_measure_after_transform(arr_ref_resized, image_resized, old_params)
+                #sm_new = similarity_measure_after_transform(arr_ref_resized, image_resized, new_params)
+                sm_old = similarity_measure_using_neighbour_similarity(image_resized, arr_ref_resized, arr_ref_resized_ns, old_params, debug=False, max_groups=6)
+                sm_new = similarity_measure_using_neighbour_similarity(image_resized, arr_ref_resized, arr_ref_resized_ns, new_params, debug=False, max_groups=6)
+                if print_messages:
+                    print("Before: sm_old = " + str(sm_old) + ", old_params = " + str(old_params))
+                    print("After:  sm_new = " + str(sm_new) + ", new_params = " + str(new_params))
+
+                # Save best result
+                if sm_new > sm_old:
+                    if print_messages:
+                        print("***New parameters will be saved.***")
+                        if used_randomisation:
+                            print("***Randomisation helped!***")
+                    params[t] = new_params
+                    not_improved_counts[t] = 0
+                    improvement = (sm_new - sm_old)/sm_old
+                    if improvement > most_significant_improvement:
+                        most_significant_improvement = improvement
+                        if print_messages:
+                            print("Most significant improvement: " + str(most_significant_improvement * 100) + "%")
+                elif continue_until_no_improvement:
+                    not_improved_counts[t] += 1
+                    num_not_improved += 1
+                    if print_messages:
+                        print("num_not_improved = " + str(num_not_improved))
+                
+                # Update sm_worst, sm_best and sm_total
+                sm = max(sm_old, sm_new)
+                sm_worst = min(sm_worst, sm)
+                sm_best = max(sm_best, sm)
+                sm_total += sm
+
+                if reuse_estimates:
+                    initial_guess_kwargs = _get_initial_guess_kwargs(params[t])
+                    #print(initial_guess_kwargs)
+            count_down = not count_down
+            num_passes += 1
+            sm_worst_list.append(sm_worst)
+            sm_best_list.append(sm_best)
+            sm_avg_list.append(sm_total/num_images)
+            if continue_until_no_improvement:
+                print_time("", start_time)
+                print("num_passes = " + str(num_passes))
+                #print("num_not_improved = " + str(num_not_improved))
+                print("Estimates improved: " + str(num_images - num_not_improved) + "/" + str(num_images))
+                print("Most significant improvement: " + str(most_significant_improvement * 100) + "%")
+        sm_worst_list_list.append(sm_worst_list)
+        sm_best_list_list.append(sm_best_list)
+        sm_avg_list_list.append(sm_avg_list)
+    # Computed offsets must be scaled up
+    if resize_image:
+        params *= np.array([[1, 1, 1, 1, height/height_resized, width/width_resized]])
+    for i in range(len(sm_avg_list_list)):
+        print(sm_avg_list_list[i], sm_best_list_list[i], sm_worst_list_list[i])
+        plt.plot(sm_avg_list_list[i])
+        plt.plot(sm_worst_list_list[i])
+        plt.plot(sm_best_list_list[i])
+        plt.show()
+    print_time("DONE", start_time)
     return params
 
 
@@ -1374,6 +1836,150 @@ def pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, n
     for t in range(num_images):
         print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
         params[t] = pyramid_affine(signal_in.data[t], arr_ref, num_levels=num_levels, registration_method=registration_method, reg_args=reg_args, reg_kwargs=reg_kwargs)
+    return params
+
+
+def faster_pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, interpolate=True, reuse_estimates=True, max_num_images=20, max_image_dimension=64, num_levels=3, polynomial_degree=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
+    # Ensure a reference image is set.
+    mi_max_index = -1
+    mi_max = 0
+    if arr_ref is None:
+        print("Obtaining arr_ref...")
+        mi_max_index = highest_mutual_information_index(signal_in)
+        arr_ref = signal_in.data[mi_max_index]
+        mi_max = im.similarity_measure(normalised_image(arr_ref), normalised_image(arr_ref), measure="NMI")
+        print("arr_ref obtained (frame " + str(mi_max_index+1) + " of " + str(num_images) + ").")
+    assert len(signal_in.data.shape) == 3
+    (num_images, height, width) = signal_in.data.shape
+    # If interpolation does not take place, num_images_inspected must equal num_images.
+    num_images_inspected = num_images
+    if interpolate:
+        num_images_inspected = min(num_images, max_num_images)
+    # Ensure the maximum dimension of images to be processed is no greater than max_image_dimension.
+    height_resized = height
+    width_resized = width
+    arr_ref_resized = arr_ref
+    resize_image = height > max_image_dimension or width > max_image_dimension
+    if resize_image:
+        if height > width:
+            height_resized = max_image_dimension
+            width_resized = int(max_image_dimension * width / height)
+        else:
+            width_resized = max_image_dimension
+            height_resized = int(max_image_dimension * height / width)
+        print("height_resized = " + str(height_resized) + ", width_resized = " + str(width_resized))
+        # Resize reference image to conform to max_image_dimension.
+        arr_ref_resized = skimage.transform.resize(arr_ref, (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+    # Select the images for which the parameters will be estimated.
+    image_indices = np.arange(num_images_inspected, dtype=float)
+    if num_images_inspected < num_images:
+        image_indices *= num_images/num_images_inspected
+    params = np.array([1, 1, 0, 0, 0, 0], dtype=float) * np.ones((num_images, 1))
+    params_found_explicitly = np.array([1, 1, 0, 0, 0, 0], dtype=float) * np.ones((num_images_inspected, 1))
+    similarity_measures_for_params_found_explicitly = np.zeros(num_images_inspected, dtype=float)
+    # Outer (pyramid) loop
+    for n in range(num_levels):
+        power_of_2 = num_levels - 1 - n
+        print("power_of_2 = " + str(power_of_2))
+        (new_height, new_width) = (height_resized//(2**power_of_2), width_resized//(2**power_of_2))
+        if new_height < 2 or new_width < 2:
+            continue
+        # Downsample reference image.
+        arr_ref_downsampled = arr_ref_resized
+        if power_of_2 > 0:
+            arr_ref_downsampled = skimage.transform.resize(arr_ref_resized, (new_height, new_width), mode='reflect', anti_aliasing=True)
+        initial_guess_kwargs_prev = {
+            'scale_x': 1,
+            'scale_y': 1,
+            'shear_radians': 0,
+            'rotate_radians': 0,
+            'offset_x': 0,
+            'offset_y': 0
+        }
+        # Inner (parameter estimation) loop
+        for j in range(num_images_inspected):
+            i = j
+            if n%2 == 1 and reuse_estimates:
+                i = num_images_inspected-1-j
+            t = int(image_indices[i])
+            print("Estimating affine parameters for frame " + str(t+1) + " of " + str(num_images))
+            image_resized = signal_in.data[t]
+            # Resize moving image to conform to max_image_dimension.
+            if resize_image:
+                image_resized = skimage.transform.resize(signal_in.data[t], (height_resized, width_resized), mode='reflect', anti_aliasing=True)
+            old_params = params[t]
+            new_params = np.empty(6, dtype=float)
+            # Transform and downsample moving image.
+            arr_moving_downsampled = transform_using_values(image_resized, old_params)
+            if power_of_2 > 0:
+                arr_moving_downsampled = skimage.transform.resize(arr_moving_downsampled, (new_height, new_width), mode='reflect', anti_aliasing=True)
+            # Initial guess for new_params produces no change, such that combined_params == old_params.
+            initial_guess_kwargs = initial_guess_kwargs_prev
+            if not reuse_estimates:
+                initial_guess_kwargs = {
+                    'scale_x': 1,
+                    'scale_y': 1,
+                    'shear_radians': 0,
+                    'rotate_radians': 0,
+                    'offset_x': 0,
+                    'offset_y': 0
+                }
+            # Estimate new_params
+            if reg_args is None:
+                new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, **initial_guess_kwargs, **reg_kwargs)
+            else:
+                new_params = registration_method(arr_moving_downsampled, arr_ref_downsampled, *reg_args, **initial_guess_kwargs, **reg_kwargs)
+            initial_guess_kwargs_prev = {
+                'scale_x': 1,
+                'scale_y': 1,
+                'shear_radians': 0,
+                'rotate_radians': 0,
+                'offset_x': 0,
+                'offset_y': 0
+            }
+            initial_guess_kwargs_prev_temp = {
+                'scale_x': new_params[0],
+                'scale_y': new_params[1],
+                'shear_radians': new_params[2],
+                'rotate_radians': new_params[3],
+                'offset_x': new_params[4],
+                'offset_y': new_params[5]
+            }
+            # Computed offsets must be scaled up
+            if power_of_2 > 0:
+                new_params[4] *= height_resized/new_height
+                new_params[5] *= width_resized/new_width
+            # Combine old_params and new_params
+            combined_params = combine_affine_params(old_params, new_params)
+            # Compare similarity measure before and after
+            sm_old = similarity_measure_after_transform(arr_ref_resized, image_resized, old_params)
+            sm_new = similarity_measure_after_transform(arr_ref_resized, image_resized, combined_params)
+            print("Before: sm_old = " + str(sm_old) + ", old_params = " + str(old_params))
+            print("After: sm_new = " + str(sm_new) + ", combined_params = " + str(combined_params))
+            # Save best result
+            similarity_measures_for_params_found_explicitly[i] = max(sm_old, sm_new)
+            if sm_new > sm_old:
+                print("New parameters will be saved.")
+                params_found_explicitly[i] = combined_params
+                initial_guess_kwargs_prev = initial_guess_kwargs_prev_temp
+        if mi_max_index >= 0 and interpolate and not reuse_estimates:
+            print("Adding most representative image to sample...")
+            mi_min_index = np.argmin(similarity_measures_for_params_found_explicitly)
+            similarity_measures_for_params_found_explicitly[mi_min_index] = mi_max
+            image_indices[mi_min_index] = mi_max_index
+            params_found_explicitly[mi_min_index] = np.array([1, 1, 0, 0, 0, 0])
+        # Interpolate
+        if interpolate:
+            for i in range(6):
+                coeffs = np.polyfit(image_indices, params_found_explicitly.T[i], polynomial_degree, w=similarity_measures_for_params_found_explicitly)
+                print("Parameter " + str(i) + ": coeffs = " + str(coeffs))
+                params.T[i] = np.poly1d(coeffs)(np.arange(num_images))
+            image_indices = (image_indices + 1) % num_images
+        else:
+            params = params_found_explicitly * 1
+    # Computed offsets must be scaled up
+    if resize_image:
+        params *= np.array([[1, 1, 1, 1, height/height_resized, width/width_resized]])
     return params
 
 
