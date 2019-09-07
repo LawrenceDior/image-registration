@@ -1,14 +1,19 @@
 import cv2
 import h5py  # hdf5 reader/writer
 import hyperspy.api as hs  # hyperspy
-import image_processing as ipm
+import image_processing as ip
 import math
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
+import reg_nonrigid as rn
+import reg_rigid as rr
+import reg_rigid_utils as rru
 import scipy
+import similarity_measure_methods as smm
 import SimpleITK as sitk
 import skimage
+import utils
 
 from scipy import ndimage as ndi
 from scipy import signal
@@ -45,8 +50,8 @@ width = 46
 vfield_1 = np.array([np.ones((height, width)) * -2, np.ones((height, width)) * +1])
 vfield_2 = np.array([np.ones((height, width)) * -2.7, np.ones((height, width)) * +1.2])
 
-arr_A = ipm.make_capital_A((height, width))
-signal_A = hs.signals.Signal2D(np.array([arr_A, ipm.apply_displacement_field_sitk(vfield_1, arr_A), ipm.apply_displacement_field_sitk(vfield_2, arr_A)]))
+arr_A = utils.make_capital_A((height, width))
+signal_A = hs.signals.Signal2D(np.array([arr_A, ip.apply_displacement_field_sitk(vfield_1, arr_A), ip.apply_displacement_field_sitk(vfield_2, arr_A)]))
 
 arr_i = np.arange(height).reshape(height, 1)
 arr_j = np.arange(width).reshape(1, width)
@@ -106,7 +111,7 @@ all_offset_x = spline_offset_x(np.arange(0, num_frames))
 all_offset_y = spline_offset_y(np.arange(0, num_frames))
 signal_A_2 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
 for t in range(num_frames):
-    signal_A_2.data[t] = ipm.transform_using_values(arr_A, [all_scale_x[t], all_scale_y[t], all_shear[t], all_rotation[t], all_offset_x[t], all_offset_y[t]], cval_mean=True)
+    signal_A_2.data[t] = ip.transform_using_values(arr_A, [all_scale_x[t], all_scale_y[t], all_shear[t], all_rotation[t], all_offset_x[t], all_offset_y[t]], cval_mean=True)
 
 # Synthetic signal with less variation than signal_A_2
 signal_A_3 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
@@ -117,4 +122,4 @@ for t in range(num_frames):
     rotation = all_rotation[t] / 2 # -pi/12 to +pi/12
     offset_x = all_offset_x[t] / 2 # -height/10 to +height/10
     offset_y = all_offset_y[t] / 2 # -width/10 to +width/10
-    signal_A_3.data[t] = ipm.transform_using_values(arr_A, [scale_x, scale_y, shear, rotation, offset_x, offset_y], cval_mean=True)
+    signal_A_3.data[t] = ip.transform_using_values(arr_A, [scale_x, scale_y, shear, rotation, offset_x, offset_y], cval_mean=True)
