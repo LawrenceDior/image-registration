@@ -1,0 +1,10 @@
+name: image_registration
+channels:
+  - simpleitk
+  - conda-forge
+  - defaults
+dependencies:
+  - h5py
+  - hyperspy
+  - opencv
+  - simpleitk

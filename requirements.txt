@@ -1,4 +1,0 @@
-h5py
-hyperspy
-opencv-python
-SimpleITK
