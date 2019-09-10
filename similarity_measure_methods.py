@@ -49,7 +49,7 @@ def similarity_measure_using_neighbour_similarity(arr_moving: np.array, arr_ref:
         if mask.sum() >= 4:
             arr_transformed_reduced = arr_transformed.ravel()[np.where(mask.ravel() == 1)]
             arr_ref_reduced = arr_ref.ravel()[np.where(mask.ravel() == 1)]
-            similarity_measures[i] = im.similarity_measure(np.array(arr_transformed_reduced), np.array(arr_ref_reduced), measure="NMI")
+            similarity_measures[i] = max(0, im.similarity_measure(np.array(arr_transformed_reduced), np.array(arr_ref_reduced), measure="NMI"))
     denominator = max(1, percentile_averages.sum())
     similarity_measures *= percentile_averages/denominator
     sm = similarity_measures.sum()

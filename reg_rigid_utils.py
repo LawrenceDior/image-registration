@@ -2,6 +2,101 @@ import math
 import numpy as np
 
 
+AFFINE_PARAMETER_NAMES = ['scale_x', 'scale_y', 'shear_radians', 'rotate_radians', 'offset_x', 'offset_y']
+DEFAULT_PARAMETER_VALUES = [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+DEFAULT_BOUNDS = {'scale_x': (0.5, 2), 'scale_y': (0.5, 2), 'shear_radians': (-math.pi/6, math.pi/6), 'rotate_radians': (-math.pi/6, math.pi/6), 'offset_x': (-100, 100), 'offset_y': (-100, 100)}
+
+
+class RandomDisplacementBounds(object):
+    """random displacement with bounds"""
+    def __init__(self, xmin=0, xmax=1, stepsize=0.5):
+        self.xmin = xmin
+        self.xmax = xmax
+        self.stepsize = stepsize
+
+    def __call__(self, x):
+        """take a random step but ensure the new position is within the bounds"""
+        return x + np.random.uniform(np.maximum(-self.stepsize, self.xmin - x), np.minimum(self.stepsize, self.xmax - x))
+
+def bounds_dict_to_array(bounds_dict: dict):
+    bounds_array = np.array(list(DEFAULT_BOUNDS.values()))
+    for i in range(6):
+        param_name = AFFINE_PARAMETER_NAMES[i]
+        if param_name in bounds_dict:
+            param = bounds_dict[param_name]
+            assert len(param) == 2
+            if float(param[0]) <= float(param[1]):
+                bounds_array[i] = (float(param[0]), float(param[1]))
+    return bounds_array
+
+def params_dict_to_array(params_dict: dict):
+    params_array = np.array(DEFAULT_PARAMETER_VALUES)
+    for i in range(6):
+        param_name = AFFINE_PARAMETER_NAMES[i]
+        if param_name in params_dict:
+            params_array[i] = params_dict[param_name]
+    return params_array
+    
+def outside_bounds(params: np.array, bounds: np.array):
+    assert len(params) == 6
+    assert len(bounds) == 6
+    [mins, maxes] = bounds.T
+    if not (np.all(mins <= maxes)):
+        print("mins: " + str(mins))
+        print("maxes: " + str(maxes))
+    assert np.all(mins <= maxes)
+    return (np.any(params < mins) or np.any(params > maxes))
+
+def get_parameter_flags(lock_strings: list):
+    lock_scale_x = 'lock_scale' in lock_strings or 'lock_scale_x' in lock_strings
+    lock_scale_y = 'lock_scale' in lock_strings or 'lock_scale_y' in lock_strings or 'isotropic_scaling' in lock_strings
+    lock_shear = 'lock_shear' in lock_strings
+    lock_rotation = 'lock_rotation' in lock_strings
+    lock_translation_x = 'lock_translation' in lock_strings or 'lock_translation_x' in lock_strings
+    lock_translation_y = 'lock_translation' in lock_strings or 'lock_translation_y' in lock_strings
+    return np.logical_not([lock_scale_x, lock_scale_y, lock_shear, lock_rotation, lock_translation_x, lock_translation_y])
+
+def fit_to_bounds(params: np.array, bounds: np.array):
+    assert len(params) == 6
+    assert len(bounds) == 6
+    params_fitted = np.array(params)
+    for i in range(6):
+        params_fitted[i] = max(params[i], bounds[i][0])
+        params_fitted[i] = min(params_fitted[i], bounds[i][1])
+    return params_fitted
+
+def list_free_parameters(params: np.array, lock_strings: list):
+    flags = get_parameter_flags(lock_strings)
+    return params[flags]
+
+def list_free_parameters_scaled_to_bounds(params: np.array, bounds: np.array, lock_strings: list):
+    [mins, maxes] = bounds.T
+    params_scaled = (params - mins) / (maxes - mins)
+    flags = get_parameter_flags(lock_strings)
+    return params_scaled[flags]
+
+def scale_parameters(params: np.array, scale_factor: float):
+    return params * np.array([1, 1, 1, 1, scale_factor, scale_factor])
+
+def recover_parameters_from_scaled_guess(guess: np.array, bounds: np.array, lock_strings: list):
+    flags = get_parameter_flags(lock_strings)
+    if len(guess) != np.sum(flags):
+        print("Mismatch between guessed parameter list length and parameter flags!")
+        print("Parameter list: " + str(guess))
+        print("(Length = " + str(len(guess)) + ")")
+        print("Parameter flags: " + str(flags))
+        print("(Total = " + str(np.sum(flags)) + ")")
+    assert len(guess) == np.sum(flags)
+    [mins, maxes] = bounds.T
+    params_scaled = np.empty(6)
+    params_scaled[flags] = guess
+    params_recovered = params_scaled * (maxes - mins) + mins
+    params_recovered[~flags] = np.array([1, 1, 0, 0, 0, 0], dtype=float)[~flags]
+    if 'isotropic_scaling' in lock_strings:
+        params_recovered[1] = params_recovered[0]
+    return params_recovered
+
+
 def remove_locked_parameters(parameters: np.array, isotropic_scaling: bool, lock_scale: bool, lock_shear: bool, lock_rotation: bool, lock_translation: bool):
     '''
     Removes any elements from `parameters` representing locked parameters that will not be optimised.
