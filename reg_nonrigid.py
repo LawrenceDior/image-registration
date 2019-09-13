@@ -106,7 +106,14 @@ def displace_signal_using_horn_schunck_repeatedly(signal_in: hs.signals.Signal2D
     return signal_out
 
 
-def nonrigid_pyramid(signal_in: hs.signals.Signal2D, num_levels=3, max_dimension=64, registration_method=horn_schunck, reg_args=None, reg_kwargs={}):
+def nonrigid_pyramid(signal_in: hs.signals.Signal2D, num_levels=3, max_image_dimension=64, registration_method=horn_schunck, reg_args=None, reg_kwargs={}):
+    '''
+    TODO: Finish implementing this function.
+    Applies a given non-rigid registration algorithm to `signal_in`.
+    If `num_levels` is greater than 1, a pyramid strategy is applied: the registration algorithm is initially performed on a downsampled version of `signal_in`, such that a coarse, approximate displacement field is obtained. The displacement field is applied to `signal_in` and the process is repeated on the result, this time less severely downsampled. Eventually, the registration method is applied to an image stack at the original resolution. By this point the remaining corrections needed should be small, so the registration method should cope better and produce a more sensible final result.
+    If `max_image_dimension` is not equal to -1, `signal_in` is downsampled to such a size that the maximum of its height and width is equal to `max_image_dimension`. The function then proceeds as though that is the original size of the images in `signal_in`.
+    `reg_args` and `reg_kwargs` contain any further arguments to be passed to `registration_method`.
+    '''
     assert len(signal_in.data.shape) == 3
     (num_images, height, width) = signal_in.data.shape
     

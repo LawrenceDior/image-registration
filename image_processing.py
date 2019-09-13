@@ -505,6 +505,10 @@ def apply_displacement_field_sitk(displacements: np.array, arr_2d_in: np.array, 
 
 
 def get_percentile_masks(arr_in: np.array, max_groups=3):
+    '''
+    Splits the pixels in `arr_in` into no more than `max_groups` groups of roughly equal size. Group assignment depends on the intensity of the corresponding pixel in `arr_in`.
+    Returns a list of groups. Each group is represented by an array of the same size as `arr_in`. Pixels in a given group are set to 1 and the rest are set to 0.
+    '''
     # arr_in will probably be a neighbour similarity array based on a reference image.
     assert max_groups >= 1
     # Each group must have at least 4 elements

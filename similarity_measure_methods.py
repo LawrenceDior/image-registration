@@ -13,17 +13,18 @@ def mutual_information(arr_1: np.array, arr_2: np.array):
     return im.mutual_information(arr_1.flatten(), arr_2.flatten())
 
 
-def similarity_measure_using_neighbour_similarity(arr_moving: np.array, arr_ref: np.array, arr_ref_ns: np.array, values: list, debug=False, max_groups=3):
+def similarity_measure_using_neighbour_similarity(arr_moving: np.array, arr_ref: np.array, arr_ref_ns: np.array, values: np.array, debug=False, max_groups=3):
+    '''
+    Transforms `arr_moving` using affine transformation parameters in `values`, then returns a similarity measure between the result and `arr_ref`.
+    The pixels in `arr_ref` are split into no more than `max_groups` groups of roughly equal size. Group assignment depends on the intensity of the corresponding pixel in `arr_ref_ns`.
+    For each group, the normalised mutual information between the corresponding pixels in `arr_ref` and the transformed array are calculated. These values are weighted by the average intensity of the corresponding pixels in `arr_ref_ns` and the weighted average is returned as the overall similarity measure. Low-uncertainty regions therefore have the greatest influence over the value returned.
+    '''
     assert arr_moving.shape == arr_ref.shape
     assert arr_ref_ns.shape == arr_ref.shape
     arr_transformed = transform_using_values(arr_moving, values, cval=float('-inf'))
     transform_mask = (arr_transformed >= arr_moving.min()-1).astype(np.int32)
     if transform_mask.max() != 1:
-        #print("transform_mask.max(): ", transform_mask.max())
-        #print("values: ", values)
         return 0
-    #assert transform_mask.max() == 1
-    #arr_ref_ns = get_neighbour_similarity(arr_ref)
     group_list = get_percentile_masks(arr_ref_ns, max_groups=max_groups)
     percentile_masks = []
     max_num_masks = len(group_list)
@@ -58,7 +59,11 @@ def similarity_measure_using_neighbour_similarity(arr_moving: np.array, arr_ref:
     return sm
 
 
-def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
+def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np.array, values: np.array, debug=False):
+    '''
+    Transforms `arr_to_transform` using affine transformation parameters in `values`, then returns the normalised mutual information between the result and `arr_fixed`.
+    Only the pixels covered by both arrays are considered when calculating the mutual information.
+    '''
     assert arr_fixed.shape == arr_to_transform.shape
     arr_transformed = transform_using_values(arr_to_transform, values, cval=float('-inf'))
     arr_1 = arr_fixed.ravel()
@@ -70,26 +75,22 @@ def similarity_measure_area_of_overlap(arr_fixed: np.array, arr_to_transform: np
         print("min = " + str(arr_to_transform.min()))
         print(values)
     for i in range(len(arr_1)):
-        #if i % (len(arr_1)//10) == 0:
-        #    print("arr_2[" + str(i) + "] = " + str(arr_2[i]))
         if arr_2[i] >= arr_to_transform.min():
             arr_1_reduced.append(arr_1[i])
             arr_2_reduced.append(arr_2[i])
     if debug:
         print("Length = " + str(len(arr_2_reduced)))
-    #assert len(arr_1_reduced) >= 3
     if len(arr_1_reduced) < 3:
         return 0
     else:
-        #sm = im.mutual_information(arr_1_reduced, arr_2_reduced) * len(arr_1_reduced) / len(arr_1)
         sm = im.similarity_measure(np.array(arr_1_reduced), np.array(arr_2_reduced), measure="NMI")
-        if debug:
-            mi = im.mutual_information(arr_1, transform_using_values(arr_to_transform, values, cval_mean=True).ravel())
-            print((mi, sm))
         return sm
 
 
-def similarity_measure_after_transform(arr_fixed: np.array, arr_to_transform: np.array, values: list, debug=False):
+def similarity_measure_after_transform(arr_fixed: np.array, arr_to_transform: np.array, values: np.array, debug=False):
+    '''
+    Transforms `arr_to_transform` using affine transformation parameters in `values`, then returns the normalised mutual information between the result and `arr_fixed`.
+    '''
     assert arr_fixed.shape == arr_to_transform.shape
     arr_transformed = transform_using_values(arr_to_transform, values, cval=float('-1'))
     sm = im.similarity_measure(arr_fixed, arr_transformed, measure="NMI")

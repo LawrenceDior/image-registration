@@ -19,6 +19,10 @@ class RandomDisplacementBounds(object):
         return x + np.random.uniform(np.maximum(-self.stepsize, self.xmin - x), np.minimum(self.stepsize, self.xmax - x))
 
 def bounds_dict_to_array(bounds_dict: dict):
+    '''
+    Takes a set of affine parameter bounds represented by a dictionary and returns the same set represented by an array.
+    Missing bounds are filled in with default values taken from `DEFAULT_BOUNDS`.
+    '''
     bounds_array = np.array(list(DEFAULT_BOUNDS.values()))
     for i in range(6):
         param_name = AFFINE_PARAMETER_NAMES[i]
@@ -30,6 +34,10 @@ def bounds_dict_to_array(bounds_dict: dict):
     return bounds_array
 
 def params_dict_to_array(params_dict: dict):
+    '''
+    Takes a set of affine parameters represented by a dictionary and returns the same set represented by an array.
+    Missing parameters are filled in with default values taken from `DEFAULT_PARAMETER_VALUES`.
+    '''
     params_array = np.array(DEFAULT_PARAMETER_VALUES)
     for i in range(6):
         param_name = AFFINE_PARAMETER_NAMES[i]
@@ -38,6 +46,9 @@ def params_dict_to_array(params_dict: dict):
     return params_array
     
 def outside_bounds(params: np.array, bounds: np.array):
+    '''
+    Returns True if the parameter set represented by `params` does not fall entirely within the bounds represented by `bounds`.
+    '''
     assert len(params) == 6
     assert len(bounds) == 6
     [mins, maxes] = bounds.T
@@ -48,6 +59,10 @@ def outside_bounds(params: np.array, bounds: np.array):
     return (np.any(params < mins) or np.any(params > maxes))
 
 def get_parameter_flags(lock_strings: list):
+    '''
+    Uses `lock_strings` to determine which affine transformation parameters are to be estimated and which are to be "locked" to a default value.
+    Returns a boolean array of size 6. Elements are True if the corresponding parameters are to be estimated, or False if they are to be "locked".
+    '''
     lock_scale_x = 'lock_scale' in lock_strings or 'lock_scale_x' in lock_strings
     lock_scale_y = 'lock_scale' in lock_strings or 'lock_scale_y' in lock_strings or 'isotropic_scaling' in lock_strings
     lock_shear = 'lock_shear' in lock_strings
@@ -57,6 +72,9 @@ def get_parameter_flags(lock_strings: list):
     return np.logical_not([lock_scale_x, lock_scale_y, lock_shear, lock_rotation, lock_translation_x, lock_translation_y])
 
 def fit_to_bounds(params: np.array, bounds: np.array):
+    '''
+    Returns a modified version of `params` such that all parameter values fall within the bounds specified by `bounds`.
+    '''
     assert len(params) == 6
     assert len(bounds) == 6
     params_fitted = np.array(params)
@@ -66,16 +84,25 @@ def fit_to_bounds(params: np.array, bounds: np.array):
     return params_fitted
 
 def list_free_parameters(params: np.array, lock_strings: list):
+    '''
+    Returns the subset of parameters in `params` which are to be estimated (as opposed to being "locked" to default values).
+    '''
     flags = get_parameter_flags(lock_strings)
     return params[flags]
 
 def list_free_parameters_scaled_to_bounds(params: np.array, bounds: np.array, lock_strings: list):
+    '''
+    Calculates a value between 0 and 1 for each element of `params`, depending on its value relative to the corresponding range specified in `bounds`, and returns the subset of these values that correspond to the parameters to be estimated.
+    '''
     [mins, maxes] = bounds.T
     params_scaled = (params - mins) / (maxes - mins)
     flags = get_parameter_flags(lock_strings)
     return params_scaled[flags]
 
 def scale_parameters(params: np.array, scale_factor: float):
+    '''
+    Scales the translation parameters in `params` by `scale_factor`.
+    '''
     return params * np.array([1, 1, 1, 1, scale_factor, scale_factor])
 
 def recover_parameters_from_scaled_guess(guess: np.array, bounds: np.array, lock_strings: list):

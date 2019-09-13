@@ -36,6 +36,9 @@ def estimate_shift_relative_to_most_representative_image(signal_in: hs.signals.S
 
 
 def skimage_estimate_shift(arr_moving: np.array, arr_ref: np.array, upsample_factor=10):
+    '''
+    Uses scikit-image to estimate the relative shift between a pair of images.
+    '''
     return skimage.feature.register_translation(arr_moving, arr_ref, upsample_factor=upsample_factor, space='real', return_error=False)
     
 
@@ -84,6 +87,17 @@ def optimise_rotation_best_of_two(arr_moving: np.array, arr_ref: np.array):
 def optimise_affine(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, shear_radians=0.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None, isotropic_scaling=False, lock_scale=False, lock_shear=False, lock_rotation=False, lock_translation=False, debug=False):
     '''
     Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
+    
+    `arr_moving`: The moving image.
+    `arr_ref`: The reference image. The function will attempt to align `arr_moving` with `arr_ref`.
+    `scale_x`, `scale_y`, `shear_radians`, `rotate_radians`, `offset_x`, `offset_y`: Initial guesses of parameter values, to be fed into the optimisation algorithm.
+    `method`: The name of the local optimisation algorithm to be used.
+    `bounds`: If not None, this is a Numpy array of six 2-tuples. Each tuple contains the minimum and maximum permitted values (in that order) of the corresponding affine transformation parameter. If `bounds` is None, default minimum and maximum values will be used.
+    `isotropic_scaling`: If True, the horizontal and vertical scale parameters will be treated as a single scale parameter, such that any change in scale will be by the same scale factor in the horizontal and vertical directions.
+    `lock_scale`, `lock_shear`, `lock_rotation`, `lock_translation`: If True, the corresponding affine translation parameter(s) will be set to a default value and no attempt will be made to optimise them.
+    `debug`: If True, debugging messages will be printed during execution.
+    
+    In theory, `optimise_affine_v2` does everything this function does and optionally more on top of that. However, `optimise_affine` seems to be faster, even when the parameters of `optimise_affine_v2` are set in such a way that it might be expected to do almost exactly the same thing.
     '''
     params = np.array([scale_x, scale_y, shear_radians, rotate_radians, offset_x, offset_y])
     (height, width) = arr_moving.shape
@@ -147,6 +161,33 @@ def optimise_affine_v2(
     basinhopping_kwargs={}):
     '''
     Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
+    
+    `arr_moving`: The moving image.
+    `arr_ref`: The reference image. The function will attempt to align `arr_moving` with `arr_ref`.
+    `arr_ref_ns`: If not None, this should be the output of `get_neighbour_similarity(arr_ref)`. Only used if `similarity_measure` is 'neighbour_similarity'.
+    `bounds`: A dictionary of up to six 2-tuples. The key corresponding to each tuple is the name of an affine transformation parameter. Each tuple contains the minimum and maximum permitted values (in that order) of the corresponding affine transformation parameter. If `bounds` is missing any parameters, default minimum and maximum values will be used for those parameters.
+    `lock_strings`: a list of some of the following strings (or an empty list):
+        - 'isotropic_scaling'
+        - 'lock_scale'
+        - 'lock_scale_x'
+        - 'lock_scale_y'
+        - 'lock_shear'
+        - 'lock_rotation'
+        - 'lock_translation'
+        - 'lock_translation_x'
+        - 'lock_translation_y'
+    If 'isotropic_scaling' is present, the horizontal and vertical scale parameters will be treated as a single scale parameter, such that any change in scale will be by the same scale factor in the horizontal and vertical directions.
+    If one or more of the other strings is present, the corresponding affine translation parameter(s) will be set to a default value and no attempt will be made to optimise them.
+    `initial_guess`: A dictionary of up to six float values. The key corresponding to each float is the name of an affine transformation parameter. Each float represents the initial guess for the corresponding affine transformation parameter, which will be fed into the optimisation algorithm. If `initial_guess` is missing any parameters, default values will be used for those parameters.
+    `debug`: If True, debugging messages will be printed during execution.
+    `local_optimisation_method`: The name of the local optimisation algorithm to be used.
+    `similarity_measure`: A string representing the similarity measure to be used. Currently the following strings are recognised:
+        - 'neighbour_similarity' (corresponds to `similarity_measure_using_neighbour_similarity`)
+        - 'overlap' (corresponds to `similarity_measure_area_of_overlap`)
+    If `similarity_measure` does not match any of these, the similarity measure used will default to `similarity_measure_after_transform`.
+    `ns_max_groups`: The value of the `max_groups` parameter passed into `similarity_measure_using_neighbour_similarity`. Only used if `similarity_measure` is 'neighbour_similarity'.
+    `basinhopping`: If True, a basin-hopping algorithm is used rather than just the local optimisation method. The function will take longer to execute if this is the case, but the results may be better.
+    `basinhopping_kwargs`: Any keyword arguments to pass into the basin-hopping algorithm. Only used if `basinhopping` is True.
     '''
         
     params = params_dict_to_array(initial_guess)
@@ -208,6 +249,8 @@ def optimise_affine_v2(
 def optimise_affine_no_shear(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, rotate_radians=0.0, offset_x=0.0, offset_y=0.0, method='Powell', bounds=None, debug=False):
     '''
     Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    
+    TODO: Determine whether `optimise_affine_v2` has made this function obsolete.
     '''
     (height, width) = arr_moving.shape
     if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
@@ -232,6 +275,8 @@ def optimise_affine_no_shear(arr_moving: np.array, arr_ref: np.array, scale_x=1.
 def optimise_scale_and_rotation(arr_moving: np.array, arr_ref: np.array, scale_x=1.0, scale_y=1.0, rotate_radians=0.0, method='Powell', bounds=None):
     '''
     Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    
+    TODO: Determine whether `optimise_affine_v2` has made this function obsolete.
     '''
     if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
         bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
@@ -251,6 +296,8 @@ def optimise_scale_and_rotation(arr_moving: np.array, arr_ref: np.array, scale_x
 def optimise_scale_and_rotation_best_of_two(arr_moving: np.array, arr_ref: np.array, method='Powell', bounds=None):
     '''
     Uses a local optimisation algorithm to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`. The shear parameter is always zero.
+    
+    TODO: Determine whether `optimise_affine_v2` has made this function obsolete.
     '''
     if bounds is None and (method == 'L-BFGS-B' or method == 'TNC' or method == 'SLSQP'):
         bounds = [(0.5, 2), (0.5, 2), (-math.pi/3, math.pi/3)]
@@ -270,6 +317,8 @@ def optimise_scale_and_rotation_best_of_two(arr_moving: np.array, arr_ref: np.ar
 def optimise_affine_by_differential_evolution(arr_moving: np.array, arr_ref: np.array, bounds=None, maxiter=1000):
     '''
     Uses a global optimisation algorithm, specifically differential evolution, to obtain a set of affine transform parameters that maximises the mutual information between `arr_transformed` and `arr_ref`, where `arr_transformed` is the transformed version of `arr_moving`.
+    
+    TODO: Determine whether `optimise_affine_v2` has made this function obsolete.
     '''
     def inverse_mutual_information_after_transform(parameters):
         #return 1/im.similarity_measure(transform_using_values(arr_moving, parameters), arr_ref)
@@ -311,6 +360,8 @@ def optimise_affine_by_differential_evolution(arr_moving: np.array, arr_ref: np.
 def pyramid_affine(arr_moving: np.array, arr_ref: np.array, num_levels=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Uses a pyramid strategy to apply `registration_method` to downsampled versions of `arr_moving`, eventually returning a list of affine transformation parameters estimated to transform arr_moving as nearly as possible to arr_ref.
+    
+    TODO: Determine whether `affine_signal_params` has made this function obsolete.
     '''
     (height, width) = arr_moving.data.shape
     params = [1, 1, 0, 0, 0, 0]
@@ -343,6 +394,8 @@ def pyramid_affine(arr_moving: np.array, arr_ref: np.array, num_levels=3, regist
 def pyramid_scale_and_translation(arr_moving: np.array, arr_ref: np.array, num_levels=3, registration_method=optimise_affine_by_differential_evolution):
     '''
     Uses a pyramid strategy to apply `registration_method` to downsampled versions of `arr_moving`, eventually returning a list of affine transformation parameters estimated to transform arr_moving as nearly as possible to arr_ref. Shear and rotation parameters are ignored.
+    
+    TODO: Determine whether `affine_signal_params` has made this function obsolete.
     '''
     (height, width) = arr_moving.data.shape
     params = [1, 1, 0, 0, 0, 0]
@@ -371,6 +424,8 @@ def pyramid_scale_and_translation(arr_moving: np.array, arr_ref: np.array, num_l
 def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_levels=3, registration_method=optimise_affine_by_differential_evolution):
     '''
     Applies `pyramid_scale_and_translation` to an entire image stack. Returns an array of parameter sets, one per image.
+    
+    TODO: Determine whether `affine_signal_params` has made this function obsolete.
     '''
     num_images = signal_in.data.shape[0]
     params = np.empty((num_images, 6))
@@ -384,6 +439,20 @@ def scale_and_translation_signal_params(signal_in: hs.signals.Signal2D, num_leve
 def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, use_normalised_average_as_reference=False, reuse_estimates=False, max_image_dimension=-1, continue_until_no_improvement=False, improvement_threshold=0.1, significant_improvement=0.05, max_num_passes=20, num_levels=1, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Applies `registration_method` to an entire image stack. Returns an array of parameter sets, one per image.
+    
+    `signal_in`: The image stack to be processed.
+    `arr_ref`: The reference image.
+    `use_normalised_average_as_reference`: If True, the normalised average of the image stack is used as a reference image, and this is updated after every pass through the image stack.
+    `reuse_estimates`: If True, the algorithm uses the parameters estimated for frame n as the initial guess for frame n+1.
+    `max_image_dimension`: If not equal to -1, `signal_in` is downsampled to such a size that the maximum of its height and width is equal to `max_image_dimension`. The function then proceeds as though that is the original size of the images in `signal_in`.
+    `continue_until_no_improvement`: If True, the algorithm makes multiple passes through the image stack, refining its estimates each time, until no further improvements are made (beyond certain limits controlled by `improvement_threshold`, `significant_improvement` and `max_num_passes`).
+    `improvement_threshold`: If after a pass through the image stack, the number of improved estimates is no more than `improvement_threshold` times the total number of images in the stack, no further passes are made. Only used if `continue_until_no_improvement` is True.
+    `significant_improvement`: If after a pass through the image stack, the greatest proportional increase in the similarity measure of each image is no greater than `significant_improvement`, no further passes are made. Only used if `continue_until_no_improvement` is True.
+    `max_num_passes`: Maximum number of passes through the image stack.
+    `num_levels`: If greater than 1, a pyramid strategy is applied: the registration algorithm is initially performed on a downsampled version of `signal_in`, such that approximate estimates are obtained, based only on the large-scale features of the images. The estimated affine transformation parameters are applied to `signal_in` and the process is repeated on the result, this time less severely downsampled. Eventually, the registration method is applied to an image stack at the original resolution.
+    `registration_method`: The affine parameter estimation method to be used.
+    `reg_args`: Any positional arguments to pass to `registration_method`.
+    `reg_kwargs`: Any keyword arguments to pass to `registration_method`.
     '''
     
     similarity_measure = 'default'
@@ -445,6 +514,7 @@ def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, use_norma
         arr_ref_resized = skimage.transform.resize(arr_ref, (height_resized, width_resized), mode='reflect', anti_aliasing=True)
     arr_ref_resized_ns = get_neighbour_similarity(arr_ref_resized)
     
+    # Method to introduce some randomness to the initial guess. Intended to be used only when reusing estimates is unlikely to help.
     def _get_random_initial_guess(initial_guess):
         lock_strings = []
         if 'lock_strings' in reg_kwargs:
@@ -632,6 +702,8 @@ def affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, use_norma
 def pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, num_levels=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
     '''
     Applies `pyramid_affine` to an entire image stack. Returns an array of parameter sets, one per image.
+    
+    TODO: Determine whether `affine_signal_params` has made this function obsolete.
     '''
     num_images = signal_in.data.shape[0]
     params = np.empty((num_images, 6))
@@ -645,6 +717,11 @@ def pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, n
 
 
 def faster_pyramid_affine_signal_params(signal_in: hs.signals.Signal2D, arr_ref=None, interpolate=True, reuse_estimates=True, max_num_images=20, max_image_dimension=64, num_levels=3, polynomial_degree=3, registration_method=optimise_affine_by_differential_evolution, reg_args=None, reg_kwargs={}):
+    '''
+    Applies `pyramid_affine` to an entire image stack. Returns an array of parameter sets, one per image. Meant to be faster than `pyramid_affine_signal_params`.
+    
+    TODO: Determine whether `affine_signal_params` has made this function obsolete.
+    '''
     # Ensure a reference image is set.
     mi_max_index = -1
     mi_max = 0
