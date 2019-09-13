@@ -115,6 +115,8 @@ for t in range(num_frames):
 
 # Synthetic signal with less variation than signal_A_2
 signal_A_3 = hs.signals.Signal2D(np.empty((num_frames, arr_A.shape[0], arr_A.shape[1])))
+# Signal with frames from signal_1_reduced transformed by the same parameters as signal_A_3
+signal_1_affine = hs.signals.Signal2D(np.empty((num_frames, height, width)))
 for t in range(num_frames):
     scale_x = (all_scale_x[t] - 1) * 0.25 + 1 # 0.95-1.05
     scale_y = (all_scale_y[t] - 1) * 0.25 + 1 # 0.95-1.05
@@ -123,3 +125,4 @@ for t in range(num_frames):
     offset_x = all_offset_x[t] / 2 # -height/10 to +height/10
     offset_y = all_offset_y[t] / 2 # -width/10 to +width/10
     signal_A_3.data[t] = ip.transform_using_values(arr_A, [scale_x, scale_y, shear, rotation, offset_x, offset_y], cval_mean=True)
+    signal_1_affine.data[t] = ip.transform_using_values(signal_1_reduced.data[t], [scale_x, scale_y, shear, rotation, offset_x, offset_y], cval_mean=True)
